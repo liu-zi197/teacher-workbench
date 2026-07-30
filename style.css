@@ -22,6 +22,9 @@ button{font-family:inherit;cursor:pointer}
 input,select,textarea{font-family:inherit;font-size:14px;color:var(--ink)}
 ::placeholder{color:#aab8c4}
 
+/* ---------- 应用根容器 ---------- */
+#appRoot{display:flex;width:100%}
+
 /* ---------- 侧边栏 ---------- */
 #sidebar{
   width:220px; flex:0 0 220px; background:#fff; border-right:1px solid var(--line);

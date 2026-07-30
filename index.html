@@ -13,22 +13,16 @@
   <div class="login-card">
     <div class="login-logo">师</div>
     <h1>教师智能工作台</h1>
-    <p class="login-sub">小学 · 初中 一线教师版 · 输入密钥进入您的专属空间</p>
     <div class="login-form">
       <div class="login-field">
         <label>访问密钥</label>
-        <input id="loginKey" placeholder="请输入您获得的密钥，如 TWB-XXXX" autocomplete="off">
+        <input id="loginKey" placeholder="请输入管理员发给您的密钥，如 TWB-AB12CD" autocomplete="off">
       </div>
       <div class="login-field">
         <label>您的称呼（选填）</label>
         <input id="loginName" placeholder="如：王老师" autocomplete="off" onkeydown="if(event.key==='Enter')doLogin()">
       </div>
       <button class="btn btn-primary login-btn" onclick="doLogin()">进入工作台</button>
-      <button class="btn login-btn" style="background:#fff;margin-top:10px" onclick="doLocalTry()">先本地体验（无需密钥）</button>
-    </div>
-    <div class="login-tip">
-      密钥由平台统一发放；每位老师拥有<strong>独立云端空间</strong>，数据互不干扰。<br>
-      尚无密钥可先体验，但数据仅保存在本机浏览器。
     </div>
   </div>
 </div>
@@ -84,5 +78,8 @@
 <div id="printArea"></div>
 
 <script src="app.js"></script>
+<!-- Excel 解析（SheetJS）与 图片文字识别（Tesseract.js），CDN 加载，首次需联网；加载失败会自动回退到粘贴/手动模式 -->
+<script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/tesseract.js@5.1.1/dist/tesseract.min.js"></script>
 </body>
 </html>

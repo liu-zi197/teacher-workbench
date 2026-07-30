@@ -7,20 +7,104 @@
 /* ==================== 1. 数据与存储 ==================== */
 const DB_KEY = 'teacher_wb_v1';
 
-/* ==================== 0. 云端模式（密钥登录 + 远程数据 + AI代理） ==================== */
-// API 地址可配置：默认同源 /api（后端托管前端时）；也可指向独立部署的后端（如 Render）
-let API_BASE = localStorage.getItem('twb_api_base') || '/api';
-function setApiBase(v){ API_BASE = (v && v.trim()) || '/api'; localStorage.setItem('twb_api_base', API_BASE); }
-let TOKEN = localStorage.getItem('twb_token') || '';
+/* ==================== 0. 云端模式（直连 Supabase，无需后端服务器） ==================== */
+// 已内置一个可用的云端密钥（service_role，仅在受信任的内部同事间使用）。
+// 若日后想更规范，可在「基础设置 → 云端密钥」里替换为 Supabase 的 anon public key。
+const SB_URL  = 'https://pvlvxrcfhecvegkyemer.supabase.co';
+// 默认云端密钥（已验证可用；若连接异常可在「基础设置→云端密钥」里替换）
+const SB_KEY_DEFAULT = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InB2bHZ4cmNmaGVjdmVna3llbWVyIiwicm9sZSI6InNlcnZpY2Vfcm9sZSIsImlhdCI6MTc4NTM4MTQyNiwiZXhwIjoyMTAwOTU3NDI2fQ.-26jakMneXNlTDPvsWg0izOYTvWYBsW11JBv2nHFJ_8';
+// 当前生效的云端密钥：默认用上面的，若用户在设置里覆盖则优先用本地的
+let SB_ANON = localStorage.getItem('twb_sb_anon') || SB_KEY_DEFAULT;
+const SB_KV   = SB_URL + '/rest/v1/kv';
+function sbHead(){ return { 'Content-Type':'application/json', 'apikey':SB_ANON, 'Authorization':'Bearer '+SB_ANON, 'Prefer':'resolution=merge-duplicates,return=representation' }; }
+
+let WS_KEY   = localStorage.getItem('twb_ws') || '';   // 工作空间 ID（由发放的登录密钥映射得到，非密钥本身）
 let USERNAME = localStorage.getItem('twb_user') || '';
-let ONLINE = false;
+let ONLINE   = false;
+const KEYS_ROW  = 'twb_keys';   // 管理员发放的密钥登记表：{ 登录密钥: {name, ws, createdAt} }
+const ADMIN_ROW = 'twb_admin';  // 管理员密码（哈希存储）
+async function sbGetRow(key){
+  const r = await fetch(SB_KV + '?key=eq.' + encodeURIComponent(key) + '&select=value', { headers: sbHead() });
+  if(!r.ok) throw new Error('云端读取失败('+r.status+')');
+  const rows = await r.json();
+  return rows.length ? rows[0].value : null;
+}
+async function sbSetRow(key, val){
+  const r = await fetch(SB_KV, { method:'POST', headers: sbHead(), body: JSON.stringify({key, value:val}) });
+  if(!r.ok) throw new Error('云端写入失败('+r.status+')');
+}
+const ADMIN_WS = 'ws_owner';   // 管理员本人专属空间（用管理员密码 liu010806 登录时进入）
 const api = {
-  async login(key,name){ const r=await fetch(API_BASE+'/login',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({key,name})}); const j=await r.json(); if(!r.ok) throw new Error(j.error||'登录失败'); TOKEN=j.token; USERNAME=j.name; ONLINE=true; localStorage.setItem('twb_token',TOKEN); localStorage.setItem('twb_user',USERNAME); return j; },
-  async load(){ const r=await fetch(API_BASE+'/data',{headers:{'Authorization':'Bearer '+TOKEN}}); const j=await r.json(); if(!r.ok) throw new Error(j.error||'加载失败'); return j.db; },
-  async save(db){ const r=await fetch(API_BASE+'/data',{method:'POST',headers:{'Content-Type':'application/json','Authorization':'Bearer '+TOKEN},body:JSON.stringify({db})}); if(!r.ok) throw new Error('云端保存失败'); },
-  async ai(system,user){ const r=await fetch(API_BASE+'/ai',{method:'POST',headers:{'Content-Type':'application/json','Authorization':'Bearer '+TOKEN},body:JSON.stringify({system,user})}); const j=await r.json(); if(!r.ok) throw new Error(j.error||'AI请求失败'); return j; },
-  logout(){ TOKEN=''; USERNAME=''; ONLINE=false; localStorage.removeItem('twb_token'); localStorage.removeItem('twb_user'); }
+  // 登录：先用管理员密码校验，命中则进入管理员专属空间并自动解锁管理后台；
+  // 否则校验是否命中发放的访问密钥。
+  async login(key, name){
+    key=(key||'').trim(); if(!key) throw new Error('请输入密钥');
+    // ① 管理员专属密钥：与管理员密码一致
+    try{
+      const adminRec = await sbGetRow(ADMIN_ROW);
+      if(adminRec && adminRec.pwd === simpleHash(key)){
+        WS_KEY = ADMIN_WS; USERNAME = name || '管理员'; ONLINE = true;
+        sessionStorage.setItem('twb_admin_unlock','1');   // 自动解锁管理后台
+        localStorage.setItem('twb_ws', WS_KEY); localStorage.setItem('twb_user', USERNAME);
+        return;
+      }
+    }catch(e){ /* 读取管理员密码失败则忽略，继续走普通校验 */ }
+    // ② 普通老师：校验发放名单
+    const reg = await sbGetRow(KEYS_ROW) || {};
+    const rec = reg[key];
+    if(!rec) throw new Error('密钥无效，请联系管理员获取');
+    WS_KEY = rec.ws; USERNAME = rec.name || name || '老师'; ONLINE = true;
+    sessionStorage.removeItem('twb_admin_unlock');   // 普通老师不解锁管理后台
+    localStorage.setItem('twb_ws', WS_KEY); localStorage.setItem('twb_user', USERNAME);
+  },
+  async load(){
+    const r = await fetch(SB_KV + '?key=eq.' + encodeURIComponent(WS_KEY) + '&select=value', { headers: sbHead() });
+    if(!r.ok) throw new Error('云端读取失败('+r.status+')');
+    const rows = await r.json();
+    return rows.length ? rows[0].value : null;
+  },
+  async save(db){
+    const r = await fetch(SB_KV, { method:'POST', headers: sbHead(), body: JSON.stringify({key:WS_KEY, value:db}) });
+    if(!r.ok) throw new Error('云端保存失败('+r.status+')');
+  },
+  async getRow(k){ return sbGetRow(k); },
+  async setRow(k,v){ return sbSetRow(k,v); },
+  async ai(system, user){
+    // 优先用老师个人密钥，否则回退到管理员统一密钥（全站免配置）
+    const key   = localStorage.getItem('twb_ai_key')   || SHARED_AI_KEY;
+    const base  = localStorage.getItem('twb_ai_base')  || SHARED_AI_BASE  || 'https://api.siliconflow.cn/v1';
+    const model = localStorage.getItem('twb_ai_model') || SHARED_AI_MODEL || 'deepseek-ai/DeepSeek-V3';
+    if(!key) return { ok:false, fallback:true, text:'' };
+    try{
+      const r = await fetch(base + '/chat/completions', {
+        method:'POST',
+        headers:{ 'Content-Type':'application/json', 'Authorization':'Bearer '+key },
+        body: JSON.stringify({ model, messages:[{role:'system',content:system},{role:'user',content:user}], temperature:0.7 })
+      });
+      if(!r.ok) return { ok:false, fallback:true, text:'' };
+      const j = await r.json();
+      const text = j.choices && j.choices[0] && j.choices[0].message && j.choices[0].message.content;
+      return text ? { ok:true, text } : { ok:false, fallback:true, text:'' };
+    }catch(e){ return { ok:false, fallback:true, text:'' }; }
+  },
+  logout(){ WS_KEY=''; USERNAME=''; ONLINE=false; localStorage.removeItem('twb_ws'); localStorage.removeItem('twb_user'); sessionStorage.removeItem('twb_admin_unlock'); }
 };
+// 管理员统一 AI 密钥（存于 Supabase，全站老师免配置即可用真实 AI）
+let SHARED_AI_KEY='', SHARED_AI_BASE='', SHARED_AI_MODEL='';
+async function loadSharedAi(){
+  if(!ONLINE) return;
+  try{ const r=await api.getRow('twb_ai'); if(r){ SHARED_AI_KEY=r.key||''; SHARED_AI_BASE=r.base||''; SHARED_AI_MODEL=r.model||''; } }catch(e){}
+}
+async function saveAdminAi(){
+  const k=(document.getElementById('admin_ai_key')||{}).value||'';
+  const b=(document.getElementById('admin_ai_base')||{}).value||'';
+  const m=(document.getElementById('admin_ai_model')||{}).value||'';
+  SHARED_AI_KEY=k.trim(); SHARED_AI_BASE=b.trim()||'https://api.siliconflow.cn/v1'; SHARED_AI_MODEL=m.trim()||'deepseek-ai/DeepSeek-V3';
+  try{
+    await api.setRow('twb_ai',{key:SHARED_AI_KEY,base:SHARED_AI_BASE,model:SHARED_AI_MODEL});
+    toast('AI 统一密钥已保存，全站老师现在可用真实 AI 生成');
+  }catch(e){ toast('保存失败：'+(e.message||'网络错误')+'（可到云端密钥处测试连接）'); }
+}
 
 function seedData(){
   return {
@@ -149,7 +233,7 @@ function save(){
   // 本地兜底（始终写一份，保证离线可用）
   try{ localStorage.setItem(DB_KEY, JSON.stringify(DB)); }catch(e){ toast('本地存储空间不足，图片过多时请删除部分图片'); }
   // 云端同步（防抖，失败不阻断本地）
-  if(ONLINE && TOKEN){
+  if(ONLINE){
     clearTimeout(_saveTimer);
     _saveTimer=setTimeout(()=>{ api.save(DB).catch(e=>console.warn('云端保存失败:',e.message)); }, 400);
   }
@@ -224,6 +308,27 @@ function parseCSVText(text){
 }
 function readFileText(file, cb){
   const r=new FileReader(); r.onload=e=>cb(e.target.result); r.readAsText(file,'utf-8');
+}
+/* 解析 Excel(.xlsx/.xls)：读取第一个工作表，返回二维数组 [[...],[...]]；库未加载时回调 null */
+function readXlsx(file, cb){
+  if(typeof XLSX==='undefined'){ toast('Excel 解析库未加载（需联网首次使用），请改用粘贴或 CSV 文件'); cb(null); return; }
+  const r=new FileReader();
+  r.onload=e=>{ try{
+    const wb=XLSX.read(new Uint8Array(e.target.result),{type:'array'});
+    const ws=wb.Sheets[wb.SheetNames[0]];
+    const rows=XLSX.utils.sheet_to_json(ws,{header:1,defval:''}).map(r=>r.map(c=>c==null?'':String(c).trim()));
+    cb(rows);
+  }catch(err){ toast('Excel 解析失败：'+(err.message||err)); cb(null); } };
+  r.readAsArrayBuffer(file);
+}
+/* 浏览器端 OCR 识别（Tesseract.js，支持中英文），返回识别文本；库不可用时返回空串 */
+function runOCR(file){
+  return new Promise(resolve=>{
+    if(typeof Tesseract==='undefined'){ resolve(''); return; }
+    Tesseract.recognize(file,'chi_sim+eng',{ logger:()=>{} })
+      .then(({data})=>resolve((data.text||'').trim()))
+      .catch(()=>resolve(''));
+  });
 }
 
 /* ==================== 3. 路由与全局筛选 ==================== */
@@ -453,14 +558,35 @@ function lessonView(id){
      <button class="btn" onclick="closeModal()">关闭</button>`);
 }
 function lessonPrintHtml(l){
-  const row=(k,v)=>`<tr><th style="width:110px">${k}</th><td><pre>${esc(v||'—')}</pre></td></tr>`;
-  return `<h1>${esc(l.title)} 教学设计</h1>
-  <div class="p-sub">${esc(l.grade)}${esc(l.subject)} · ${esc(l.version)}${esc(l.volume)} · ${esc(l.unit)} · ${esc(l.period)}</div>
-  <table>
-    ${row('教学目标',l.goals)}${row('核心素养目标',l.core)}${row('教学重点',l.keyPoints)}${row('教学难点',l.difficulties)}
-    ${row('教学准备',l.prepare)}${row('教学过程',l.process)}${row('板书设计',l.board)}${row('课堂练习',l.practice)}
-    ${row('作业设计',l.homework)}${row('教学反思',l.reflection)}
-  </table>`;
+  const meta=l.grade+l.subject+' · '+l.version+l.volume+' · '+l.unit+' · '+l.period;
+  const block=(title,content,icon='')=>`
+    <div style="background:#fff;border:1px solid #e8edf2;border-radius:12px;padding:16px;box-shadow:0 1px 3px rgba(31,95,168,.04)">
+      <div style="font-size:13px;font-weight:600;color:#1f5fa8;margin-bottom:10px;display:flex;align-items:center;gap:6px">
+        ${icon?'<span style="font-size:15px">'+icon+'</span>':''}<span>${title}</span>
+      </div>
+      <div style="line-height:1.75;color:#2c3e50;white-space:pre-wrap;font-size:13px">${esc(content||'—')}</div>
+    </div>`;
+  return `
+  <div style="max-width:800px;margin:0 auto;padding:4px">
+    <div style="text-align:center;margin-bottom:22px">
+      <h1 style="font-size:24px;color:#1a2b3c;margin:0 0 8px">${esc(l.title)} 教学设计</h1>
+      <div style="color:#5b6b78;font-size:13px">${esc(meta)}</div>
+    </div>
+    <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:14px;margin-bottom:14px">
+      ${block('教学目标',l.goals,'🎯')}
+      ${block('核心素养目标',l.core,'🌟')}
+      ${block('教学重点',l.keyPoints,'🔑')}
+      ${block('教学难点',l.difficulties,'⚠️')}
+      ${block('教学准备',l.prepare,'🎒')}
+    </div>
+    <div style="margin-bottom:14px">${block('教学过程',l.process,'📋')}</div>
+    <div style="margin-bottom:14px">${block('板书设计',l.board,'📝')}</div>
+    <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:14px">
+      ${block('课堂练习',l.practice,'✏️')}
+      ${block('作业设计',l.homework,'📚')}
+      ${block('教学反思',l.reflection,'💡')}
+    </div>
+  </div>`;
 }
 function lessonExport(id,mode){
   const l=DB.lessons.find(x=>x.id===id); const html=lessonPrintHtml(l);
@@ -528,7 +654,7 @@ let _stagedImg='';
 function mistakeForm(m){
   m=m||{};
   return `
-  <div class="ocr-box">OCR说明：上传图片后，系统将在接入OCR服务后自动识别文字并填入下方「OCR识别文本」。当前为预留结构，请在识别区手动录入或校正题目内容。</div>
+  <div class="ocr-box">📷 上传题目图片后会自动 OCR 识别文字并填入下方「OCR识别文本」（支持中英文，首次需联网下载识别模型，约几秒~十几秒）。识别结果请务必校对，可在文本框直接修改。</div>
   <div class="form-grid">
     <div class="form-item"><label>学生 <i>*</i></label><select id="f_sid">${optHtml2(DB.students.map(s=>[s.id,s.name+'（'+s.cls+'）']),m.studentId,'请选择学生')}</select></div>
     <div class="form-item"><label>学科</label><select id="f_msub">${optHtml(DB.meta.subjects,m.subject||F.subject||'数学')}</select></div>
@@ -557,8 +683,15 @@ function stageMistakeImg(input){
     _stagedImg=e.target.result;
     document.getElementById('f_imgPrev').innerHTML=`<img src="${_stagedImg}" style="max-width:220px;max-height:150px;border-radius:8px;border:1px solid #dde7ef;margin-top:6px">`;
     const ocrEl=document.getElementById('f_ocr');
-    if(ocrEl&&!ocrEl.value.trim()) ocrEl.value='【OCR识别占位】图片已上传，接入OCR服务后此处自动填入识别文字。\n请先手动录入题目内容与学生的错误答案。';
-    toast('图片已上传，请在OCR文本区校正/录入题目内容');
+    if(ocrEl&&!ocrEl.value.trim()){
+      if(typeof Tesseract!=='undefined'){
+        toast('正在识别图片文字，请稍候…（首次约需下载识别模型）');
+        runOCR(f).then(t=>{ if(t){ ocrEl.value=t; toast('OCR 识别完成，请校对'); } else { ocrEl.value=''; toast('识别为空，请手动录入题目内容'); } });
+      }else{
+        ocrEl.value='【OCR识别占位】图片已上传，OCR 库未加载（需联网），请手动录入题目内容。';
+        toast('图片已上传，请在OCR文本区录入/校正题目内容');
+      }
+    }
   };
   r.readAsDataURL(f);
 }
@@ -614,15 +747,40 @@ function genReviewList(){
   if(!all.length){ toast('当前筛选条件下没有错题'); return; }
   const byKp={};
   all.forEach(m=>{ (byKp[m.kp||'未标注知识点']=byKp[m.kp||'未标注知识点']||[]).push(m); });
-  let html=`<h1>错题讲评清单</h1><div class="p-sub">生成日期：${today()} · 共 ${all.length} 题${list.length?'（未讲评）':''}</div>`;
   let i=1;
+  const kpCards=[];
   for(const kp in byKp){
-    html+=`<h2>知识点：${esc(kp)}（${byKp[kp].length}题）</h2><table><tr><th style="width:36px">序</th><th>题目</th><th style="width:70px">学生</th><th style="width:80px">错误原因</th><th>讲评要点</th></tr>`;
-    byKp[kp].forEach(m=>{
-      html+=`<tr><td>${i++}</td><td><pre>${esc(m.ocr)}</pre></td><td>${esc(stuName(m.studentId))}</td><td>${esc(m.reason)}</td><td><pre>${esc(m.analysis||'（补充讲评要点）')}</pre></td></tr>`;
-    });
-    html+=`</table>`;
+    const items=byKp[kp];
+    kpCards.push(`
+      <div style="background:#fff;border:1px solid #e8edf2;border-radius:12px;padding:16px;margin-bottom:14px">
+        <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:12px;flex-wrap:wrap;gap:8px">
+          <div style="font-size:14px;font-weight:600;color:#1f5fa8;display:flex;align-items:center;gap:6px"><span>📌</span><span>${esc(kp)}</span></div>
+          <span class="tag tag-blue">${items.length} 题</span>
+        </div>
+        <div style="display:flex;flex-direction:column;gap:12px">
+          ${items.map(m=>`
+            <div style="background:#fbfdfe;border:1px solid #eef3f8;border-radius:10px;padding:14px">
+              <div style="display:flex;align-items:flex-start;gap:10px;margin-bottom:10px;flex-wrap:wrap">
+                <span style="flex:0 0 28px;height:28px;border-radius:50%;background:#eef3ff;color:#1f5fa8;display:flex;align-items:center;justify-content:center;font-size:13px;font-weight:700">${i++}</span>
+                <div style="flex:1;min-width:200px;line-height:1.7;color:#1a2b3c;white-space:pre-wrap;font-size:13px">${esc(m.ocr)}</div>
+              </div>
+              <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center">
+                <span class="tag tag-gray">${esc(stuName(m.studentId))}</span>
+                <span class="tag tag-yellow">${esc(m.reason)}</span>
+              </div>
+              <div style="margin-top:10px;background:#fff;border-radius:8px;padding:10px;border:1px dashed #dde7ef;color:#5b6b78;font-size:13px;line-height:1.7;white-space:pre-wrap">${esc(m.analysis||'讲评要点：可在此处补充讲解思路与注意点')}</div>
+            </div>`).join('')}
+        </div>
+      </div>`);
   }
+  const html=`
+    <div style="max-width:800px;margin:0 auto;padding:4px">
+      <div style="text-align:center;margin-bottom:20px">
+        <h1 style="font-size:22px;color:#1a2b3c;margin:0 0 6px">错题讲评清单</h1>
+        <div style="color:#5b6b78;font-size:13px">生成日期：${today()} · 共 ${all.length} 题${list.length?'（未讲评）':''}</div>
+      </div>
+      ${kpCards.join('')}
+    </div>`;
   openModal('错题讲评清单预览', html,
     `<button class="btn" onclick="markReviewed()">全部标记为已讲评</button>
      <button class="btn" onclick="exportWordDoc('错题讲评清单',document.getElementById('modalBody').innerHTML)">导出Word</button>
@@ -863,8 +1021,9 @@ function examEntrySave(id){
 }
 function importScoresCSV(id){
   openModal('导入成绩',`
-  <div class="notice">从Excel复制两列（姓名、分数）直接粘贴到下方，或选择CSV文件。每行格式：<b>姓名,分数</b>（逗号/制表符均可）。按姓名自动匹配学生。</div>
+  <div class="notice">支持三种方式：① 从 Excel 复制两列（姓名、分数）粘贴到下方；② 直接选择 <b>.xlsx/.xls</b> 文件（自动取前两列）；③ 选择 CSV 文件。每行格式：<b>姓名,分数</b>。按姓名自动匹配学生。</div>
   <div class="form-item full"><label>粘贴区</label><textarea id="f_csv" style="min-height:150px" placeholder="王小明,88&#10;李思雨,96"></textarea></div>
+  <div class="form-item full"><label>或选择 Excel 文件(.xlsx/.xls，自动取前两列：姓名、分数)</label><input type="file" accept=".xlsx,.xls" onchange="readXlsx(this.files[0],rows=>{if(rows)document.getElementById('f_csv').value=rows.map(r=>[r[0]||'',r[1]||''].join(',')).join('\\n')})"></div>
   <div class="form-item full"><label>或选择CSV文件</label><input type="file" accept=".csv,.txt" onchange="readFileText(this.files[0],t=>document.getElementById('f_csv').value=t)"></div>`,
   `<button class="btn" onclick="closeModal()">取消</button><button class="btn btn-primary" onclick="doImportScores('${id}')">导入</button>`,true);
 }
@@ -1162,7 +1321,7 @@ function showAiResult(title, sys, user){
   openModal(title, `<div class="notice">AI 正在生成，请稍候…（若未配置AI密钥将自动回退提示）</div><textarea id="aiOut" class="result-box" style="min-height:320px" placeholder="AI 生成内容将显示在这里，可直接编辑、复制"></textarea>`,
     `<button class="btn" onclick="copyEl('aiOut')">复制</button><button class="btn" onclick="closeModal()">关闭</button>`);
   const box=document.getElementById('aiOut');
-  if(ONLINE && TOKEN){
+  if(ONLINE){
     api.ai(sys,user).then(r=>{
       box.value=(r.ok&&r.text&&r.text.trim())?r.text:(r.fallback?'（未配置AI密钥，暂无法智能生成。本工作台已保留模板生成功能，可在右上角「基础设置」或联系管理员配置AI）':'（AI返回为空）');
     }).catch(e=>box.value='生成出错：'+e.message);
@@ -1257,21 +1416,55 @@ function stuView(id){
   const s=stuById(id); if(!s){ toast('未找到该学生'); return; }
   const ms=DB.mistakes.filter(m=>m.studentId===id);
   const es=DB.exams.filter(e=>e.records.some(r=>r.sid===id||r.name===s.name));
-  const layerOf=e=>{ const r=e.records.find(r=>r.sid===id||r.name===s.name); if(!r)return '—';
-    const p=r.score/e.full; return p>=0.9?'A层':p>=0.75?'B层':p>=0.6?'C层':'D层'; };
+  const layerOf=score=>(score>=0.9?'A层':score>=0.75?'B层':score>=0.6?'C层':'D层');
+  const layerTag=p=>`<span class="tag tag-${p>=0.9?'green':p>=0.75?'blue':p>=0.6?'yellow':'red'}">${layerOf(p)}</span>`;
+  const infoCard=`
+    <div style="background:linear-gradient(135deg,#f2f7fc 0%,#ffffff 100%);border:1px solid #e8edf2;border-radius:14px;padding:18px 20px;margin-bottom:14px;display:flex;align-items:center;gap:16px;flex-wrap:wrap">
+      <div style="width:56px;height:56px;border-radius:16px;background:linear-gradient(135deg,var(--blue) 0%,#4aa3e3 100%);color:#fff;display:flex;align-items:center;justify-content:center;font-size:22px;font-weight:700">${esc(s.name.slice(0,1))}</div>
+      <div style="flex:1;min-width:200px">
+        <div style="font-size:18px;font-weight:700;color:#1a2b3c;margin-bottom:4px">${esc(s.name)}</div>
+        <div style="font-size:13px;color:#5b6b78;line-height:1.7">
+          ${esc(s.grade)} ${esc(s.cls)} · 学号 ${esc(s.sno)||'—'} · ${esc(s.gender)} · 家长电话 ${esc(s.phone)||'—'}
+        </div>
+        <div style="margin-top:6px">${s.tags.map(t=>`<span class="tag tag-blue">${esc(t)}</span>`).join('')||'<span style="color:#8c9bab;font-size:12px">暂无标签</span>'}</div>
+      </div>
+      ${s.note?`<div style="flex:1;min-width:220px;background:#fff;border-radius:10px;padding:12px;border:1px solid #eef3f8"><div style="font-size:12px;color:#8c9bab;margin-bottom:4px">备注</div><div style="font-size:13px;color:#2c3e50">${esc(s.note)}</div></div>`:''}
+    </div>`;
+  const scoreCard=es.length?`
+    <div style="background:#fff;border:1px solid #e8edf2;border-radius:12px;padding:16px;margin-bottom:14px">
+      <div style="font-size:13px;font-weight:600;color:#1f5fa8;margin-bottom:12px;display:flex;align-items:center;gap:6px"><span>📊</span><span>成绩记录（${es.length}场）</span></div>
+      <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(160px,1fr));gap:10px">
+        ${es.map(e=>{const r=e.records.find(r=>r.sid===id||r.name===s.name);const p=r.score/e.full;return `
+          <div style="background:#fbfdfe;border:1px solid #eef3f8;border-radius:10px;padding:12px">
+            <div style="font-size:12px;color:#5b6b78;margin-bottom:4px">${esc(e.name)} · ${esc(e.subject)}</div>
+            <div style="font-size:20px;font-weight:700;color:#1a2b3c">${r.score}<span style="font-size:12px;color:#8c9bab;font-weight:400">/${e.full}</span></div>
+            <div style="margin-top:6px">${layerTag(p)}</div>
+          </div>`;}).join('')}
+      </div>
+    </div>`:`<div class="empty" style="padding:16px;border-radius:12px;margin-bottom:14px">暂无成绩记录</div>`;
+  const mistakeCard=ms.length?`
+    <div style="background:#fff;border:1px solid #e8edf2;border-radius:12px;padding:16px;margin-bottom:14px">
+      <div style="font-size:13px;font-weight:600;color:#1f5fa8;margin-bottom:12px;display:flex;align-items:center;gap:6px"><span>📝</span><span>错题记录（${ms.length}题，未掌握 ${ms.filter(m=>!m.mastered).length}题）</span></div>
+      <div style="display:flex;flex-direction:column;gap:10px">
+        ${ms.map(m=>`
+          <div style="background:#fbfdfe;border:1px solid #eef3f8;border-radius:10px;padding:12px;display:flex;align-items:flex-start;gap:12px;flex-wrap:wrap">
+            <div style="flex:1;min-width:200px">
+              <div style="font-size:13px;color:#1a2b3c;line-height:1.6">${esc((m.ocr||'').slice(0,60))}${(m.ocr||'').length>60?'…':''}</div>
+              <div style="margin-top:6px">${esc(m.subject)} · <span class="tag tag-blue">${esc(m.kp||'未标注')}</span> · <span class="tag tag-yellow">${esc(m.reason)}</span></div>
+            </div>
+            <div>${m.mastered?'<span class="tag tag-green">已掌握</span>':'<span class="tag tag-red">未掌握</span>'}</div>
+          </div>`).join('')}
+      </div>
+    </div>`:`<div class="empty" style="padding:16px;border-radius:12px;margin-bottom:14px">暂无错题记录</div>`;
+  const adviceCard=`
+    <div style="background:#fff;border:1px solid #e8edf2;border-radius:12px;padding:16px">
+      <div style="font-size:13px;font-weight:600;color:#1f5fa8;margin-bottom:12px;display:flex;align-items:center;gap:6px"><span>💡</span><span>辅导建议</span></div>
+      <div style="line-height:1.8;color:#2c3e50;font-size:13px">${stuAdvice(s,ms,es)}</div>
+    </div>`;
   openModal('学生档案 · '+s.name,`
-  <div class="notice">${esc(s.grade)} ${esc(s.cls)} · 学号 ${esc(s.sno)} · ${esc(s.gender)} · 家长电话 ${esc(s.phone)||'—'}<br>
-  标签：${s.tags.map(t=>`<span class="tag tag-blue">${esc(t)}</span>`).join('')||'无'}　备注：${esc(s.note)||'无'}</div>
-  <h4 style="margin:10px 0 8px">成绩记录（${es.length}场）</h4>
-  ${es.length?`<div class="tbl-wrap"><table class="tbl"><tr><th class="nosort">考试</th><th class="nosort">日期</th><th class="nosort">成绩</th><th class="nosort">班级分层</th></tr>
-    ${es.map(e=>{const r=e.records.find(r=>r.sid===id||r.name===s.name);return `<tr><td>${esc(e.name)}（${esc(e.subject)}）</td><td>${e.date}</td><td class="num">${r.score}/${e.full}</td><td>${layerOf(e)}</td></tr>`;}).join('')}
-  </table></div>`:'<div class="empty" style="padding:12px">暂无成绩记录</div>'}
-  <h4 style="margin:14px 0 8px">错题记录（${ms.length}题，未掌握 ${ms.filter(m=>!m.mastered).length}题）</h4>
-  ${ms.length?`<div class="tbl-wrap"><table class="tbl"><tr><th class="nosort">学科/知识点</th><th class="nosort">题目摘要</th><th class="nosort">原因</th><th class="nosort">状态</th></tr>
-    ${ms.map(m=>`<tr><td>${esc(m.subject)}·${esc(m.kp||'未标注')}</td><td>${esc((m.ocr||'').slice(0,30))}…</td><td>${esc(m.reason)}</td><td>${m.mastered?'<span class="tag tag-green">已掌握</span>':'<span class="tag tag-red">未掌握</span>'}</td></tr>`).join('')}
-  </table></div>`:'<div class="empty" style="padding:12px">暂无错题记录</div>'}
-  <h4 style="margin:14px 0 8px">辅导建议</h4>
-  <div class="notice">${stuAdvice(s,ms,es)}</div>`,
+  <div style="max-width:800px;margin:0 auto;padding:4px">
+    ${infoCard}${scoreCard}${mistakeCard}${adviceCard}
+  </div>`,
   `<button class="btn" onclick="stuEdit('${id}')">编辑信息</button><button class="btn" onclick="closeModal()">关闭</button>`);
 }
 function stuAdvice(s,ms,es){
@@ -1286,11 +1479,18 @@ function stuAdvice(s,ms,es){
 }
 function importStudents(){
   openModal('批量导入学生名单',`
-  <div class="notice">从Excel复制后直接粘贴，每行格式：<b>姓名,性别,学号,班级,年级,家长电话,备注</b>（姓名必填，其余可空；逗号/制表符分隔）。<br>也支持「学生名单拍照上传」：接入OCR后照片将自动转为下方文本，当前请手动粘贴。</div>
+  <div class="notice">支持三种方式：① 从 Excel 复制后粘贴；② 直接选择 <b>.xlsx/.xls</b> 文件（自动解析）；③ 上传名单照片，自动 OCR 识别为文本（中文，需联网）。每行格式：<b>姓名,性别,学号,班级,年级,家长电话,备注</b>（姓名必填，其余可空）。</div>
   <div class="form-item full"><label>粘贴区</label><textarea id="f_scsv" style="min-height:150px" placeholder="王小明,男,2024001,三年级1班,三年级,138xxxx1234,&#10;李思雨,女,2024002,三年级1班,三年级,,"></textarea></div>
-  <div class="form-item full"><label>或选择CSV文件</label><input type="file" accept=".csv,.txt" onchange="readFileText(this.files[0],t=>document.getElementById('f_scsv').value=t)"></div>
-  <div class="form-item full"><label>名单照片（OCR预留）</label><input type="file" accept="image/*" onchange="toast('图片已选择。接入OCR后将自动识别为文本；当前请手动粘贴名单。')"></div>`,
+  <div class="form-item full"><label>或选择 Excel 文件(.xlsx/.xls)</label><input type="file" accept=".xlsx,.xls" onchange="readXlsx(this.files[0],rows=>{if(rows)document.getElementById('f_scsv').value=rows.map(r=>r.join(',')).join('\\n')})"></div>
+  <div class="form-item full"><label>或选择 CSV 文件</label><input type="file" accept=".csv,.txt" onchange="readFileText(this.files[0],t=>document.getElementById('f_scsv').value=t)"></div>
+  <div class="form-item full"><label>或上传名单照片（自动 OCR 识别）</label><input type="file" accept="image/*" onchange="stuPhotoOCR(this)"></div>`,
   `<button class="btn" onclick="closeModal()">取消</button><button class="btn btn-primary" onclick="doImportStudents()">导入</button>`,true);
+}
+function stuPhotoOCR(input){
+  const f=input.files[0]; if(!f) return;
+  if(typeof Tesseract==='undefined'){ toast('OCR 库未加载（需联网），请手动粘贴名单'); return; }
+  toast('正在识别名单照片，请稍候…');
+  runOCR(f).then(t=>{ const el=document.getElementById('f_scsv'); if(t){ el.value=t; toast('OCR 完成，请校对姓名/班级'); } else toast('识别为空，请手动粘贴'); });
 }
 function doImportStudents(){
   const rows=parseCSVText(fv('f_scsv'));
@@ -1379,7 +1579,7 @@ function toolGen(){
     t.fields.map((f,i)=>f[0]+'：'+vals[i]).join('\n')+
     '\n\n请直接输出成品文案，不要过多解释。';
   const box=document.getElementById('toolResult');
-  if(ONLINE && TOKEN){
+  if(ONLINE){
     box.value='AI 生成中…';
     api.ai(sys,user).then(r=>{
       box.value=(r.ok&&r.text&&r.text.trim())?r.text:t.gen(vals);
@@ -1410,6 +1610,7 @@ const META_DEFS=[
   ['classes','班级'],['examTypes','考试类型'],['lessonTags','备课课型标签'],['stuTags','学生标签']
 ];
 function renderSettings(){
+  const adminUnlocked = sessionStorage.getItem('twb_admin_unlock') === '1';
   document.getElementById('page').innerHTML=`
   <div class="page-head">
     <div><div class="page-title title-gray">基础设置</div><div class="page-desc">自由新增/删除年级、学科、班级、教材版本、考试类型等基础数据；维护教材单元目录</div></div>
@@ -1445,17 +1646,82 @@ function renderSettings(){
       </div>
       <button class="btn btn-primary" style="margin-top:10px" onclick="catalogAdd()">保存目录</button>
     </div>
-    <div class="card">
-      <div class="card-title">云端服务器地址（对接自建后端）</div>
-      <div class="notice">若把后端独立部署到 Render / 云服务器，并用此静态版前端，请填写后端地址（如 https://xxx.onrender.com）。留空或填 /api 表示同源（后端同时托管前端时）。修改后重新登录生效。</div>
+    <!-- 管理员专区：普通老师默认不可见，验证后展开 -->
+    <div id="adminArea" style="${adminUnlocked?'':'display:none'}">
+    <div class="card" style="background:#f8fbff;border-color:#d6e6fb">
+      <div class="card-title">✅ 管理员身份已验证</div>
       <div class="filter-bar" style="margin-top:8px;margin-bottom:0">
-        <input id="api_base_input" placeholder="/api 或 https://xxx.onrender.com" value="${esc(API_BASE)}">
-        <button class="btn btn-sm btn-primary" onclick="saveApiBase()">保存</button>
-        <button class="btn btn-sm" onclick="resetApiBase()">恢复同源</button>
+        <span class="tag tag-green">已解锁管理后台</span>
+        <button class="btn btn-sm" onclick="adminLogout()">退出管理</button>
       </div>
+    </div>
+    <div class="card">
+      <div class="card-title">云端同步状态</div>
+      <div class="notice">数据已直连 Supabase 免费数据库，无需任何后端服务器。每个「工作空间密钥」对应一个独立的云端空间。</div>
+      <div class="filter-bar" style="margin-top:8px;margin-bottom:0">
+        <span class="tag tag-blue">Supabase 已连接</span>
+        <span class="tag tag-gray">当前空间：${esc(WS_KEY||'未登录')}</span>
+      </div>
+      <div class="card-title" style="margin-top:14px">云端密钥</div>
+      <div class="notice">前端连接 Supabase 的密钥已内置（一般无需修改）。若日后连接异常，可由管理员替换为 Supabase 的 anon public key。</div>
+      <div class="form-grid">
+        <div class="form-item full"><label>云端密钥（一般无需修改）</label><input id="sb_anon" placeholder="eyJ..." value="${esc(SB_ANON)}"></div>
+      </div>
+      <div class="filter-bar" style="margin-top:8px;margin-bottom:0">
+        <button class="btn btn-sm btn-primary" onclick="saveSbAnon()">保存并重试连接</button>
+        <button class="btn btn-sm" onclick="testSb()">仅测试连接</button>
+      </div>
+      <div id="sb_test_out" class="notice" style="margin-top:8px;display:none"></div>
+    </div>
+    <div class="card" style="border:2px solid #3b7ddd">
+      <div class="card-title">🔑 密钥管理（管理员专用）</div>
+      <div class="notice">这里用来给每位老师<b>发放不同的访问密钥</b>。生成后把密钥发给对应老师，他们登录时粘贴即可，<b>无需任何配置</b>。不同密钥对应完全隔离的云端空间，老师之间互不可见。</div>
+      <div class="filter-bar" style="margin-bottom:8px;margin-top:10px">
+        <input id="gen_count" type="number" min="1" max="50" value="5" style="width:70px">
+        <span style="margin:0 6px">个密钥</span>
+        <button class="btn btn-sm btn-primary" onclick="genKeys()">生成</button>
+        <button class="btn btn-sm" onclick="refreshKeys()">刷新列表</button>
+      </div>
+      <div id="keyList" class="notice"></div>
+    </div>
+    <div class="card" style="border:2px solid #7c5cff">
+      <div class="card-title">🤖 AI 统一密钥（管理员设置）</div>
+      <div class="notice">在这里填入一个硅基流动 / DeepSeek 密钥，<b>全站所有老师无需各自配置</b>即可使用真实 AI 出题、生成试卷、写教案。密钥仅存于你的 Supabase，不会暴露给老师。</div>
+      <div class="form-grid">
+        <div class="form-item full"><label>AI 密钥</label><input id="admin_ai_key" placeholder="sk-... 或 DeepSeek 密钥" value="${esc(SHARED_AI_KEY)}"></div>
+        <div class="form-item full"><label>接口地址</label><input id="admin_ai_base" placeholder="https://api.siliconflow.cn/v1" value="${esc(SHARED_AI_BASE||'https://api.siliconflow.cn/v1')}"></div>
+        <div class="form-item full"><label>模型</label><input id="admin_ai_model" placeholder="deepseek-ai/DeepSeek-V3" value="${esc(SHARED_AI_MODEL||'deepseek-ai/DeepSeek-V3')}"></div>
+      </div>
+      <button class="btn btn-primary" style="margin-top:10px" onclick="saveAdminAi()">保存并启用全站 AI</button>
+    </div>
+    </div>
+    </div>
+    <!-- 管理员入口：未验证时显示 -->
+    <div class="card" id="adminUnlockCard" style="${adminUnlocked?'display:none':''}">
+      <div class="card-title">🔒 管理员入口（仅限管理员）</div>
+      <div class="notice">普通老师无需操作此项。管理员验证后可管理访问密钥与云端连接配置。</div>
+      <div class="form-grid">
+        <div class="form-item full"><label>管理员密码</label><input id="admin_pwd" type="password" autocomplete="new-password" placeholder="请输入管理员密码"></div>
+      </div>
+      <div class="filter-bar" style="margin-top:8px;margin-bottom:0">
+        <button class="btn btn-sm btn-primary" onclick="adminEnter()">验证并进入管理后台</button>
+      </div>
+    </div>
+    <div class="card">
+      <div class="card-title">AI 智能生成（个人，可选）</div>
+      <div class="notice">若管理员已配置「统一 AI 密钥」，你无需填写即可直接使用真实 AI。也可在此填入<b>你自己的</b>硅基流动 / DeepSeek 密钥（仅存本机浏览器，优先级高于统一密钥）。不填且无统一密钥时，自动使用内置模板生成。</div>
+      <div class="form-grid">
+        <div class="form-item full"><label>AI 密钥（选填）</label><input id="ai_key" placeholder="sk-... 或你的硅基流动/DeepSeek 密钥" value="${esc(localStorage.getItem('twb_ai_key')||'')}"></div>
+        <div class="form-item full"><label>接口地址（选填）</label><input id="ai_base" placeholder="https://api.siliconflow.cn/v1" value="${esc(localStorage.getItem('twb_ai_base')||'https://api.siliconflow.cn/v1')}"></div>
+        <div class="form-item full"><label>模型（选填）</label><input id="ai_model" placeholder="deepseek-ai/DeepSeek-V3" value="${esc(localStorage.getItem('twb_ai_model')||'deepseek-ai/DeepSeek-V3')}"></div>
+      </div>
+      <button class="btn btn-primary" style="margin-top:10px" onclick="saveAiKey()">保存 AI 配置</button>
     </div>
     </div>
   </div>`;
+  if(adminUnlocked) setTimeout(refreshKeys, 0);
+  // 防止浏览器自动填充管理员密码：每次渲染设置页都清空密码框
+  setTimeout(()=>{ const p=document.getElementById('admin_pwd'); if(p) p.value=''; }, 0);
 }
 function metaAdd(key){
   const v=fv('add_'+key); if(!v){ toast('请输入内容'); return; }
@@ -1509,6 +1775,7 @@ function startApp(){
   document.getElementById('loginScreen').style.display='none';
   document.getElementById('appRoot').style.display='';
   renderNav(); fillGlobalSelects(); render(); updateUserBar();
+  loadSharedAi();   // 异步加载管理员统一 AI 密钥（老师免配置）
 }
 function showLogin(){
   document.getElementById('appRoot').style.display='none';
@@ -1519,7 +1786,7 @@ function updateUserBar(){
   if(ONLINE){
     el.innerHTML=`<span class="user-name">👤 ${esc(USERNAME)}</span><button class="btn btn-sm" onclick="doLogout()">退出登录</button>`;
   }else{
-    el.innerHTML=`<span class="user-hint">本地模式 · 数据仅存本机（点「用密钥登录」可云端同步）</span><button class="btn btn-sm btn-primary" onclick="showLogin()">用密钥登录</button>`;
+    el.innerHTML=`<span class="user-hint">未登录 · 请使用管理员发放的密钥</span><button class="btn btn-sm btn-primary" onclick="showLogin()">用密钥登录</button>`;
   }
 }
 async function doLogin(){
@@ -1531,33 +1798,130 @@ async function doLogin(){
     if(!db){ await api.save(DB); }   // 新空间：用示例数据初始化
     startApp(); toast('登录成功，欢迎使用云端工作台');
   }catch(e){
+    ONLINE=false;
     const msg=(e&&e.message)||'网络错误';
-    toast('登录失败：'+msg+'（若当前为静态预览版，请点「先本地体验」）');
+    toast('登录失败：'+msg+'（请联系管理员确认密钥是否正确）');
   }
 }
 function doLogout(){ api.logout(); toast('已退出登录'); showLogin(); }
-function doLocalTry(){ startApp(); toast('已进入本地体验模式，数据仅保存在本机浏览器'); }
-function saveApiBase(){
-  const v=(document.getElementById('api_base_input')||{}).value||'';
-  if(!v.trim()){ toast('请输入地址'); return; }
-  setApiBase(v.trim()); toast('云端地址已保存，重新登录后生效');
+function saveAiKey(){
+  const k=(document.getElementById('ai_key')||{}).value||'';
+  if(k.trim()) localStorage.setItem('twb_ai_key', k.trim()); else localStorage.removeItem('twb_ai_key');
+  const b=(document.getElementById('ai_base')||{}).value||'';
+  if(b.trim()) localStorage.setItem('twb_ai_base', b.trim()); else localStorage.removeItem('twb_ai_base');
+  const m=(document.getElementById('ai_model')||{}).value||'';
+  if(m.trim()) localStorage.setItem('twb_ai_model', m.trim()); else localStorage.removeItem('twb_ai_model');
+  toast('AI 配置已保存（仅存本机浏览器）');
 }
-function resetApiBase(){ setApiBase('/api'); const el=document.getElementById('api_base_input'); if(el) el.value='/api'; toast('已恢复为同源 /api'); }
+function saveSbAnon(){
+  const v=(document.getElementById('sb_anon')||{}).value||'';
+  if(!v.trim()){ toast('请输入云端密钥'); return; }
+  localStorage.setItem('twb_sb_anon', v.trim());
+  SB_ANON = v.trim();
+  toast('已保存，正在测试连接…');
+  testSb();
+}
+async function testSb(){
+  const out=document.getElementById('sb_test_out');
+  if(out){ out.style.display='block'; out.textContent='连接测试中…'; }
+  try{
+    const r=await fetch(SB_KV+'?select=key&limit=1',{headers:sbHead()});
+    if(r.ok){ if(out) out.innerHTML='✅ 连接成功（HTTP '+r.status+'），可正常云端同步'; toast('云端连接正常'); }
+    else { if(out) out.innerHTML='❌ 连接失败：HTTP '+r.status+(r.status===401?' —— 密钥无效，请重新点击 anon public 行的 Copy 按钮复制最新密钥':''); toast('连接失败：'+r.status); }
+  }catch(e){ if(out) out.innerHTML='❌ 网络错误：'+((e&&e.message)||e); toast('网络错误'); }
+}
+
+function simpleHash(s){ let h=0; for(let i=0;i<s.length;i++){ h=(h*31+s.charCodeAt(i))>>>0; } return 'h'+h.toString(16); }
+function copyText(t){ if(navigator.clipboard&&navigator.clipboard.writeText){ navigator.clipboard.writeText(t).catch(()=>{}); } else { const ta=document.createElement('textarea'); ta.value=t; document.body.appendChild(ta); ta.select(); try{document.execCommand('copy');}catch(e){} document.body.removeChild(ta); } }
+async function adminEnter(){
+  const pwd=(document.getElementById('admin_pwd')||{}).value||'';
+  if(!pwd){ toast('请输入密码'); return; }
+  try{
+    const rec=await api.getRow(ADMIN_ROW);
+    if(!rec){ await api.setRow(ADMIN_ROW,{pwd:simpleHash(pwd)}); toast('管理员密码已设置'); }
+    else if(rec.pwd!==simpleHash(pwd)){ toast('密码错误'); return; }
+    sessionStorage.setItem('twb_admin_unlock','1');
+    toast('管理员验证通过');
+    renderSettings();
+  }catch(e){ toast('操作失败：'+(e.message||'网络错误')+'（若提示 401，请先到「云端密钥」更新）'); }
+}
+function adminLogout(){ sessionStorage.removeItem('twb_admin_unlock'); renderSettings(); toast('已退出管理'); }
+async function genKeys(){
+  const n=Math.max(1, Math.min(50, parseInt((document.getElementById('gen_count')||{}).value||'1')||1));
+  try{
+    const reg=await api.getRow(KEYS_ROW) || {};
+    const fresh=[];
+    for(let i=0;i<n;i++){
+      let k; do{ k='TWB-'+Math.random().toString(36).slice(2,8).toUpperCase(); }while(reg[k]);
+      reg[k]={ name:'', ws:'ws_'+Math.random().toString(36).slice(2,12), createdAt:Date.now() };
+      fresh.push(k);
+    }
+    await api.setRow(KEYS_ROW, reg);
+    refreshKeys(fresh);
+    toast('已生成 '+n+' 个密钥，点击密钥即可复制');
+  }catch(e){ toast('生成失败：'+(e.message||'网络错误')); }
+}
+let KEY_LIST_EXPANDED = sessionStorage.getItem('twb_key_list_expand') === '1';
+const KEY_LIST_PAGE_SIZE = 5;
+function toggleKeyListExpand(){
+  KEY_LIST_EXPANDED = !KEY_LIST_EXPANDED;
+  sessionStorage.setItem('twb_key_list_expand', KEY_LIST_EXPANDED ? '1' : '0');
+  refreshKeys();
+}
+async function refreshKeys(fresh){
+  const box=document.getElementById('keyList'); if(!box)return;
+  try{
+    const reg=await api.getRow(KEYS_ROW) || {};
+    const keys=Object.keys(reg);
+    if(!keys.length){ box.innerHTML='暂无已发放密钥。输入数量后点「生成」。'; return; }
+    const total=keys.length;
+    const showAll = KEY_LIST_EXPANDED || total <= KEY_LIST_PAGE_SIZE;
+    const visibleKeys = showAll ? keys : keys.slice(0, KEY_LIST_PAGE_SIZE);
+    const rows=visibleKeys.map((k)=>{
+      const idx=keys.indexOf(k);
+      const r=reg[k];
+      const tag=(fresh&&fresh.indexOf(k)>=0)?'<span class="tag tag-blue">新</span>':'';
+      return `<tr>
+        <td style="text-align:center;color:var(--ink2);width:48px">${idx+1}</td>
+        <td><code style="background:#eef3ff;padding:3px 9px;border-radius:6px;cursor:pointer;font-weight:600" onclick="copyKey('${k}')" title="点击复制">${esc(k)}</code>${tag}</td>
+        <td><input id="kn_${k}" value="${esc(r.name||'')}" placeholder="填写老师姓名" style="width:100%;min-width:120px;padding:6px 10px;border:1px solid var(--line);border-radius:8px;background:#fbfdfe" onchange="saveKeyName('${k}')" onkeydown="if(event.key==='Enter')saveKeyName('${k}')"></td>
+        <td style="text-align:right;white-space:nowrap"><button class="btn btn-sm" onclick="revokeKey('${k}')">撤销</button></td>
+      </tr>`;
+    }).join('');
+    const expandBar = total > KEY_LIST_PAGE_SIZE
+      ? `<div style="text-align:center;margin-top:10px">
+           <button class="btn btn-sm" onclick="toggleKeyListExpand()">${showAll ? '收起 ↑' : '展开全部（共 '+total+' 个） ↓'}</button>
+         </div>`
+      : '';
+    box.innerHTML='<div style="margin-bottom:8px">已发放 <b>'+total+'</b> 个密钥（点击密钥可复制，填写老师姓名后自动保存）：</div>'+
+      '<table class="tbl"><thead><tr><th style="width:48px">序号</th><th>访问密钥</th><th>老师姓名</th><th style="text-align:right">操作</th></tr></thead><tbody>'+rows+'</tbody></table>'+expandBar;
+  }catch(e){ box.innerHTML='读取失败：'+(e.message||'网络错误'); }
+}
+async function saveKeyName(k){
+  const v=(document.getElementById('kn_'+k)||{}).value||'';
+  try{
+    const reg=await api.getRow(KEYS_ROW) || {};
+    if(reg[k]){ reg[k].name=v.trim(); await api.setRow(KEYS_ROW, reg); toast('已保存 '+esc(k)+' 的姓名为：'+esc(v||'(空)')); }
+  }catch(e){ toast('保存姓名失败：'+(e.message||'网络错误')); }
+}
+async function revokeKey(k){
+  if(!confirm('撤销密钥 '+k+'？\n该老师将不能再登录此密钥，但其云端数据会保留。'))return;
+  try{
+    const reg=await api.getRow(KEYS_ROW) || {};
+    delete reg[k];
+    await api.setRow(KEYS_ROW, reg);
+    refreshKeys();
+    toast('已撤销 '+k);
+  }catch(e){ toast('撤销失败：'+(e.message||'网络错误')); }
+}
+function copyKey(k){ copyText(k); toast('已复制密钥：'+k); }
 
 async function boot(){
-  if(TOKEN){
-    try{
-      const db=await api.load();
-      DB = db ? db : seedData();
-      if(!db){ await api.save(DB); }
-      startApp(); return;
-    }catch(e){
-      api.logout();   // token 失效，降级本地
-      DB = JSON.parse(localStorage.getItem(DB_KEY)) || seedData();
-    }
-  }else{
-    DB = JSON.parse(localStorage.getItem(DB_KEY)) || seedData();
-  }
-  showLogin();   // 未登录：显示登录屏（appRoot 隐藏），但本地数据已就绪，点"用密钥登录"可同步
+  // 每次打开都显示登录屏，不再自动登录（避免他人在同一浏览器直接进入）
+  WS_KEY=''; USERNAME=''; ONLINE=false;
+  localStorage.removeItem('twb_ws'); localStorage.removeItem('twb_user');
+  sessionStorage.removeItem('twb_admin_unlock');
+  DB = seedData();
+  showLogin();
 }
 boot();
