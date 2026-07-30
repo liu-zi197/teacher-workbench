@@ -1,0 +1,29 @@
+# Render 部署配置（零成本免费层）
+# 用法：把整个 teacher-workbench 仓库推到 GitHub → Render 新建 "Blueprint" → 选中仓库即可。
+# 免费层文件系统是临时的，务必在环境变量里配置 SUPABASE_URL / SUPABASE_KEY（见 README）。
+services:
+  - type: web
+    name: teacher-workbench
+    runtime: node
+    plan: free
+    branch: main
+    buildCommand: "true"
+    startCommand: "node server/server.js"
+    healthCheckPath: /
+    envVars:
+      - key: SUPABASE_URL
+        sync: false
+      - key: SUPABASE_KEY
+        sync: false
+      - key: AI_KEY
+        sync: false
+      - key: AI_BASE
+        sync: false
+      - key: AI_MODEL
+        sync: false
+      - key: ADMIN_KEY
+        sync: false
+      - key: SECRET
+        sync: false
+      - key: CORS_ORIGIN
+        sync: false

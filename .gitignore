@@ -1,0 +1,12 @@
+# 环境变量（含密钥、AI key，勿提交）
+.env
+.env.local
+.env.*.local
+
+# 运行时数据（本地 JSON 存储与密钥，勿提交）
+server/data/
+
+# 依赖与系统文件
+node_modules/
+.DS_Store
+Thumbs.db

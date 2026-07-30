@@ -1,0 +1,88 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>中小学教师智能工作台</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+<!-- 登录屏 -->
+<div id="loginScreen">
+  <div class="login-card">
+    <div class="login-logo">师</div>
+    <h1>教师智能工作台</h1>
+    <p class="login-sub">小学 · 初中 一线教师版 · 输入密钥进入您的专属空间</p>
+    <div class="login-form">
+      <div class="login-field">
+        <label>访问密钥</label>
+        <input id="loginKey" placeholder="请输入您获得的密钥，如 TWB-XXXX" autocomplete="off">
+      </div>
+      <div class="login-field">
+        <label>您的称呼（选填）</label>
+        <input id="loginName" placeholder="如：王老师" autocomplete="off" onkeydown="if(event.key==='Enter')doLogin()">
+      </div>
+      <button class="btn btn-primary login-btn" onclick="doLogin()">进入工作台</button>
+      <button class="btn login-btn" style="background:#fff;margin-top:10px" onclick="doLocalTry()">先本地体验（无需密钥）</button>
+    </div>
+    <div class="login-tip">
+      密钥由平台统一发放；每位老师拥有<strong>独立云端空间</strong>，数据互不干扰。<br>
+      尚无密钥可先体验，但数据仅保存在本机浏览器。
+    </div>
+  </div>
+</div>
+
+<!-- 应用主体 -->
+<div id="appRoot">
+
+<!-- 左侧导航 -->
+<aside id="sidebar">
+  <div class="brand">
+    <div class="logo">师</div>
+    <div>
+      <div class="brand-name">教师智能工作台</div>
+      <div class="brand-sub">小学 · 初中 一线教师版</div>
+    </div>
+  </div>
+  <nav id="navList"></nav>
+  <div class="sidebar-foot" id="sidebarFoot">
+    支持导出 Word / PDF / A4打印
+  </div>
+</aside>
+
+<!-- 主区 -->
+<main>
+  <header id="topbar">
+    <input type="text" id="gSearch" placeholder="全局搜索：课题 / 学生 / 知识点 / 考试名称…" oninput="onGlobalFilter()">
+    <select id="gGrade" onchange="onGlobalFilter()"></select>
+    <select id="gSubject" onchange="onGlobalFilter()"></select>
+    <select id="gClass" onchange="onGlobalFilter()"></select>
+    <div id="userBar" style="margin-left:auto"></div>
+    <button class="btn" onclick="exportCurrent('word')">导出Word</button>
+    <button class="btn" onclick="exportCurrent('pdf')">导出PDF</button>
+    <button class="btn btn-primary" onclick="exportCurrent('print')">A4打印</button>
+  </header>
+  <section id="page"></section>
+</main>
+
+</div>
+
+<!-- 弹窗 -->
+<div id="modalMask" class="hidden" onclick="if(event.target===this)closeModal()">
+  <div id="modalBox">
+    <div class="modal-head">
+      <h3 id="modalTitle">标题</h3>
+      <button class="modal-close" onclick="closeModal()">&times;</button>
+    </div>
+    <div class="modal-body" id="modalBody"></div>
+    <div class="modal-foot" id="modalFoot"></div>
+  </div>
+</div>
+
+<div id="toast"></div>
+<div id="printArea"></div>
+
+<script src="app.js"></script>
+</body>
+</html>
