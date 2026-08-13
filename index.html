@@ -2,7 +2,7 @@
 <html lang="zh-CN">
 <head>
 <meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover, minimum-scale=1.0, maximum-scale=1.0, user-scalable=no">
 <title>中小学教师智能工作台</title>
 <link rel="stylesheet" href="style.css">
 </head>
@@ -45,10 +45,18 @@
   </div>
 </aside>
 
+<!-- 移动端导航遮罩 -->
+<div id="navBackdrop" onclick="toggleNav()"></div>
+
 <!-- 主区 -->
 <main>
   <header id="topbar">
-    <input type="text" id="gSearch" placeholder="全局搜索：课题 / 学生 / 知识点 / 考试名称…" oninput="onGlobalFilter()">
+    <button id="navToggle" class="nav-toggle" onclick="toggleNav()" title="菜单" aria-label="菜单">☰</button>
+    <div class="search-box" style="position:relative;flex:1 1 280px;min-width:120px;display:flex;gap:6px">
+      <input type="text" id="gSearch" placeholder="全局搜索：课题 / 学生 / 知识点 / 考试名称…" onkeydown="if(event.key==='Enter')onGlobalFilter()" style="flex:1">
+      <button class="btn btn-primary" onclick="onGlobalFilter()">🔍 搜索</button>
+      <button class="btn" onclick="document.getElementById('gSearch').value='';onGlobalFilter()" title="清空">×</button>
+    </div>
     <select id="gGrade" onchange="onGlobalFilter()"></select>
     <select id="gSubject" onchange="onGlobalFilter()"></select>
     <select id="gClass" onchange="onGlobalFilter()"></select>
