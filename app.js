@@ -10,9 +10,9 @@ const DB_KEY = 'teacher_wb_v1';
 /* ==================== 0. 云端模式（直连 Supabase，无需后端服务器） ==================== */
 // 已内置一个可用的云端密钥（service_role，仅在受信任的内部同事间使用）。
 // 若日后想更规范，可在「基础设置 → 云端密钥」里替换为 Supabase 的 anon public key。
-const SB_URL  = 'https://pvlvxrcfhecvegkyemer.supabase.co';
+const SB_URL  = 'https://lgyempybiotpdmkbtug.supabase.co';
 // 默认云端密钥（已验证可用；若连接异常可在「基础设置→云端密钥」里替换）
-const SB_KEY_DEFAULT = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InB2bHZ4cmNmaGVjdmVna3llbWVyIiwicm9sZSI6InNlcnZpY2Vfcm9sZSIsImlhdCI6MTc4NTM4MTQyNiwiZXhwIjoyMTAwOTU3NDI2fQ.-26jakMneXNlTDPvsWg0izOYTvWYBsW11JBv2nHFJ_8';
+const SB_KEY_DEFAULT = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImxneGVtcGdiaWJvdHBkbWtidHVnIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODgxNDE1MzAsImV4cCI6MjEwMzcxNzUzMH0.26xhHvbq8YzZN5ktTsWh4IjRQtAmegvmUZyYc6h1LAg';
 // 当前生效的云端密钥：默认用上面的，若用户在设置里覆盖则优先用本地的
 let SB_ANON = localStorage.getItem('twb_sb_anon') || SB_KEY_DEFAULT;
 const SB_KV   = SB_URL + '/rest/v1/kv';

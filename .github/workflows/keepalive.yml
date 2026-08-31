@@ -1,0 +1,22 @@
+name: Supabase Keepalive
+# 作用：每天自动 ping 一次 Supabase，使项目保持「活跃」，避免免费层 7 天无调用被 pause/删除。
+# anon key 可公开（前端本就使用），故直接内置，无需在仓库配置 secrets。
+on:
+  schedule:
+    - cron: '17 0 * * *'   # 每天 UTC 00:17
+  workflow_dispatch: {}    # 可手动在 Actions 页面点 Run workflow 测试
+
+jobs:
+  ping:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Ping Supabase to prevent pause
+        env:
+          SUPABASE_URL: https://lgyempybiotpdmkbtug.supabase.co
+          SUPABASE_ANON_KEY: eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImxneGVtcGdiaWJvdHBkbWtidHVnIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODgxNDE1MzAsImV4cCI6MjEwMzcxNzUzMH0.26xhHvbq8YzZN5ktTsWh4IjRQtAmegvmUZyYc6h1LAg
+        run: |
+          curl -fsS -o /dev/null \
+            -H "apikey: $SUPABASE_ANON_KEY" \
+            -H "Authorization: Bearer $SUPABASE_ANON_KEY" \
+            "$SUPABASE_URL/rest/v1/kv?select=key&limit=1"
+          echo "keepalive ok @ $(date -u)"
