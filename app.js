@@ -89,6 +89,23 @@ const api = {
   },
   logout(){ WS_KEY=''; USERNAME=''; ONLINE=false; localStorage.removeItem('twb_ws'); localStorage.removeItem('twb_user'); sessionStorage.removeItem('twb_admin_unlock'); }
 };
+
+/* ==================== 保活心跳（防 Supabase 7 天无活动被 pause） ==================== */
+// 每次打开工作台/登录后：若距上次心跳 > 12 小时，就发一次轻量请求给 Supabase。
+// 多人使用 = 任何老师每天打开一次 = 项目永远"活跃"，免费层永不被清理。
+function keepAlive(force){
+  try{
+    const KEY='twb_keepalive_ts';
+    const last=parseInt(localStorage.getItem(KEY)||'0',10);
+    const now=Date.now();
+    if(!force && last && (now-last) < 12*3600*1000) return;   // 12 小时内已 ping 过则跳过
+    localStorage.setItem(KEY, String(now));
+    // 轻量读：仅 select key 字段，limit 1，几乎不占配额
+    fetch(SB_KV + '?select=key&limit=1', { headers: sbHead() })
+      .then(r=>{ if(r.ok) console.log('[keepalive] supabase ping ok'); })
+      .catch(e=>{ /* 网络失败不影响主功能 */ });
+  }catch(e){}
+}
 // 管理员统一 AI 密钥（存于 Supabase，全站老师免配置即可用真实 AI）
 let SHARED_AI_KEY='', SHARED_AI_BASE='', SHARED_AI_MODEL='';
 async function loadSharedAi(){
@@ -3043,11 +3060,14 @@ function classReportExport(mode){
 }
 
 /* ==================== 13. 初始化 / 登录 ==================== */
+// 页面打开立即触发一次心跳（即使未登录，只要应用被打开，supabase 就算活跃）
+keepAlive();
 function startApp(){
   document.getElementById('loginScreen').style.display='none';
   document.getElementById('appRoot').style.display='';
   renderNav(); fillGlobalSelects(); render(); updateUserBar();
   loadSharedAi();   // 异步加载管理员统一 AI 密钥（老师免配置）
+  keepAlive(true);  // 登录成功后再补一次心跳
 }
 function showLogin(){
   document.getElementById('appRoot').style.display='none';

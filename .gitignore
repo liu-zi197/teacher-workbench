@@ -10,3 +10,6 @@ server/data/
 node_modules/
 .DS_Store
 Thumbs.db
+
+# 当前 PAT 无 workflow 权限，workflow 文件不入仓；如以后拿到 workflow PAT 可移除此行
+.github/workflows/keepalive.yml
