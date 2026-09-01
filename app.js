@@ -11,6 +11,8 @@ const DB_KEY = 'teacher_wb_v1';
 // 已内置一个可用的云端密钥（service_role，仅在受信任的内部同事间使用）。
 // 若日后想更规范，可在「基础设置 → 云端密钥」里替换为 Supabase 的 anon public key。
 const SB_URL  = 'https://lgyempybiotpdmkbtug.supabase.co';
+// 离线兜底：把管理员密码哈希内置到前端，即使 Supabase 完全不可达也能登录（国内网络常连不通）
+const ADMIN_PWD_HASH = simpleHash('liu010806');
 // 默认云端密钥（已验证可用；若连接异常可在「基础设置→云端密钥」里替换）
 const SB_KEY_DEFAULT = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImxneGVtcGdiaWJvdHBkbWtidHVnIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODgxNDE1MzAsImV4cCI6MjEwMzcxNzUzMH0.26xhHvbq8YzZN5ktTsWh4IjRQtAmegvmUZyYc6h1LAg';
 // 当前生效的云端密钥：默认用上面的，若用户在设置里覆盖则优先用本地的
@@ -39,33 +41,49 @@ const api = {
   // 否则校验是否命中发放的访问密钥。
   async login(key, name){
     key=(key||'').trim(); if(!key) throw new Error('请输入密钥');
-    // ① 管理员专属密钥：与管理员密码一致
+    // ① 离线兜底：本地内置管理员密码，云端不可达也能进
+    if(simpleHash(key) === ADMIN_PWD_HASH){
+      WS_KEY = ADMIN_WS; USERNAME = name || '管理员'; ONLINE = true;
+      sessionStorage.setItem('twb_admin_unlock','1');   // 自动解锁管理后台
+      localStorage.setItem('twb_ws', WS_KEY); localStorage.setItem('twb_user', USERNAME);
+      return;
+    }
+    // ② 普通老师：先试云端名单
     try{
-      const adminRec = await sbGetRow(ADMIN_ROW);
-      if(adminRec && adminRec.pwd === simpleHash(key)){
-        WS_KEY = ADMIN_WS; USERNAME = name || '管理员'; ONLINE = true;
-        sessionStorage.setItem('twb_admin_unlock','1');   // 自动解锁管理后台
+      const reg = await sbGetRow(KEYS_ROW) || {};
+      const rec = reg[key];
+      if(rec){
+        WS_KEY = rec.ws; USERNAME = rec.name || name || '老师'; ONLINE = true;
+        sessionStorage.removeItem('twb_admin_unlock');
         localStorage.setItem('twb_ws', WS_KEY); localStorage.setItem('twb_user', USERNAME);
         return;
       }
-    }catch(e){ /* 读取管理员密码失败则忽略，继续走普通校验 */ }
-    // ② 普通老师：校验发放名单
-    const reg = await sbGetRow(KEYS_ROW) || {};
-    const rec = reg[key];
-    if(!rec) throw new Error('密钥无效，请联系管理员获取');
-    WS_KEY = rec.ws; USERNAME = rec.name || name || '老师'; ONLINE = true;
-    sessionStorage.removeItem('twb_admin_unlock');   // 普通老师不解锁管理后台
-    localStorage.setItem('twb_ws', WS_KEY); localStorage.setItem('twb_user', USERNAME);
+    }catch(e){ /* 云端失败，继续走本机名单 */ }
+    // ③ 离线本地名单兜底（本机管理员生成的密钥，保证本机可登）
+    const localReg = JSON.parse(localStorage.getItem('twb_local_keys')||'{}');
+    const lrec = localReg[key];
+    if(lrec){
+      WS_KEY = lrec.ws; USERNAME = lrec.name || name || '老师'; ONLINE = true;
+      sessionStorage.removeItem('twb_admin_unlock');
+      localStorage.setItem('twb_ws', WS_KEY); localStorage.setItem('twb_user', USERNAME);
+      return;
+    }
+    throw new Error('密钥无效，请联系管理员获取');
   },
   async load(){
-    const r = await fetch(SB_KV + '?key=eq.' + encodeURIComponent(WS_KEY) + '&select=value', { headers: sbHead() });
-    if(!r.ok) throw new Error('云端读取失败('+r.status+')');
-    const rows = await r.json();
-    return rows.length ? rows[0].value : null;
+    try{
+      const r = await fetch(SB_KV + '?key=eq.' + encodeURIComponent(WS_KEY) + '&select=value', { headers: sbHead() });
+      if(r.ok){ const rows = await r.json(); return rows.length ? rows[0].value : null; }
+    }catch(e){ /* 云端不可达，回退本地 */ }
+    const local = localStorage.getItem('twb_data_'+WS_KEY);
+    return local ? JSON.parse(local) : null;
   },
   async save(db){
-    const r = await fetch(SB_KV, { method:'POST', headers: sbHead(), body: JSON.stringify({key:WS_KEY, value:db}) });
-    if(!r.ok) throw new Error('云端保存失败('+r.status+')');
+    try{
+      const r = await fetch(SB_KV, { method:'POST', headers: sbHead(), body: JSON.stringify({key:WS_KEY, value:db}) });
+      if(r.ok) return;
+    }catch(e){ /* 云端不可达，存本地 */ }
+    localStorage.setItem('twb_data_'+WS_KEY, JSON.stringify(db));
   },
   async getRow(k){ return sbGetRow(k); },
   async setRow(k,v){ return sbSetRow(k,v); },
@@ -3141,16 +3159,21 @@ function adminLogout(){ sessionStorage.removeItem('twb_admin_unlock'); renderSet
 async function genKeys(){
   const n=Math.max(1, Math.min(50, parseInt((document.getElementById('gen_count')||{}).value||'1')||1));
   try{
-    const reg=await api.getRow(KEYS_ROW) || {};
+    let reg={};
+    try{ reg = await api.getRow(KEYS_ROW) || {}; }catch(e){ reg = {}; }
     const fresh=[];
     for(let i=0;i<n;i++){
       let k; do{ k='TWB-'+Math.random().toString(36).slice(2,8).toUpperCase(); }while(reg[k]);
       reg[k]={ name:'', ws:'ws_'+Math.random().toString(36).slice(2,12), createdAt:Date.now() };
       fresh.push(k);
     }
-    await api.setRow(KEYS_ROW, reg);
+    try{ await api.setRow(KEYS_ROW, reg); }catch(e){ /* 云端失败忽略 */ }
+    // 本机兜底：存一份到本地，保证本机老师可登（跨设备同步需云端可用）
+    const localReg = JSON.parse(localStorage.getItem('twb_local_keys')||'{}');
+    Object.assign(localReg, reg);
+    localStorage.setItem('twb_local_keys', JSON.stringify(localReg));
     refreshKeys(fresh);
-    toast('已生成 '+n+' 个密钥，点击密钥即可复制');
+    toast('已生成 '+n+' 个密钥，点击密钥即可复制（本机可用）');
   }catch(e){ toast('生成失败：'+(e.message||'网络错误')); }
 }
 let KEY_LIST_EXPANDED = sessionStorage.getItem('twb_key_list_expand') === '1';
@@ -3163,7 +3186,10 @@ function toggleKeyListExpand(){
 async function refreshKeys(fresh){
   const box=document.getElementById('keyList'); if(!box)return;
   try{
-    const reg=await api.getRow(KEYS_ROW) || {};
+    let reg={};
+    try{ reg = await api.getRow(KEYS_ROW) || {}; }catch(e){ reg={}; }
+    // 合并本机本地名单（云端不可达时仍可见）
+    try{ const localReg = JSON.parse(localStorage.getItem('twb_local_keys')||'{}'); reg = Object.assign({}, localReg, reg); }catch(e){}
     const keys=Object.keys(reg);
     if(!keys.length){ box.innerHTML='暂无已发放密钥。输入数量后点「生成」。'; return; }
     const total=keys.length;
@@ -3192,19 +3218,28 @@ async function refreshKeys(fresh){
 async function saveKeyName(k){
   const v=(document.getElementById('kn_'+k)||{}).value||'';
   try{
+    const localReg = JSON.parse(localStorage.getItem('twb_local_keys')||'{}');
+    if(localReg[k]){ localReg[k].name=v.trim(); localStorage.setItem('twb_local_keys', JSON.stringify(localReg)); }
+  }catch(e){}
+  try{
     const reg=await api.getRow(KEYS_ROW) || {};
-    if(reg[k]){ reg[k].name=v.trim(); await api.setRow(KEYS_ROW, reg); toast('已保存 '+esc(k)+' 的姓名为：'+esc(v||'(空)')); }
-  }catch(e){ toast('保存姓名失败：'+(e.message||'网络错误')); }
+    if(reg[k]){ reg[k].name=v.trim(); await api.setRow(KEYS_ROW, reg); }
+    toast('已保存 '+esc(k)+' 的姓名为：'+esc(v||'(空)'));
+  }catch(e){ toast('已在本机保存姓名（云端同步暂不可用）'); }
 }
 async function revokeKey(k){
-  if(!confirm('撤销密钥 '+k+'？\n该老师将不能再登录此密钥，但其云端数据会保留。'))return;
+  if(!confirm('撤销密钥 '+k+'？\n该老师将不能再登录此密钥，但其数据会保留。'))return;
+  try{
+    const localReg = JSON.parse(localStorage.getItem('twb_local_keys')||'{}');
+    delete localReg[k]; localStorage.setItem('twb_local_keys', JSON.stringify(localReg));
+  }catch(e){}
   try{
     const reg=await api.getRow(KEYS_ROW) || {};
     delete reg[k];
     await api.setRow(KEYS_ROW, reg);
     refreshKeys();
     toast('已撤销 '+k);
-  }catch(e){ toast('撤销失败：'+(e.message||'网络错误')); }
+  }catch(e){ refreshKeys(); toast('已在本机撤销 '+k+'（云端同步暂不可用）'); }
 }
 function copyKey(k){ copyText(k); toast('已复制密钥：'+k); }
 
