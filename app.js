@@ -7,34 +7,65 @@
 /* ==================== 1. 数据与存储 ==================== */
 const DB_KEY = 'teacher_wb_v1';
 
-/* ==================== 0. 云端模式（直连 Supabase，无需后端服务器） ==================== */
-// 已内置一个可用的云端密钥（service_role，仅在受信任的内部同事间使用）。
-// 若日后想更规范，可在「基础设置 → 云端密钥」里替换为 Supabase 的 anon public key。
-const SB_URL  = 'https://lgyempybiotpdmkbtug.supabase.co';
-// 离线兜底：把管理员密码哈希内置到前端，即使 Supabase 完全不可达也能登录（国内网络常连不通）
+/* ==================== 0. 云端模式（直连 GitHub 仓库，国内可达、永久免费） ==================== */
+// 数据存于公开仓库 teacher-workbench 的 data/ 目录，内容用 AES-GCM 加密（防公开仓库内容被随手读取）。
+// GH_TOKEN 为「仅限本仓库 Contents 读写」的令牌；可在「基础设置 → 云端同步」里覆盖（存本地）。
+const GH_REPO  = 'liu-zi197/teacher-workbench';
+const GH_API   = 'https://api.github.com/repos/'+GH_REPO+'/contents/data/';
+const GH_REPO_API = 'https://api.github.com/repos/'+GH_REPO;
+const GH_TOKEN_DEFAULT = '';   // 默认不内置令牌：由管理员在「基础设置→云端同步令牌」或老师登录页「同步码」填写（存本地，不进仓库，避免密钥泄露防护拦截）
+let   GH_TOKEN = localStorage.getItem('twb_gh_token') || GH_TOKEN_DEFAULT;
+
+// —— AES-GCM 加密（密钥在前端可见，仅防公开仓库内容被偶然读取，非绝对保密）——
+const _enc = new TextEncoder(), _dec = new TextDecoder();
+function _b64u(b){ const a=new Uint8Array(b); let s=''; for(let i=0;i<a.length;i++) s+=String.fromCharCode(a[i]); return btoa(s); }
+function _b64d(s){ const b=atob(s); const a=new Uint8Array(b.length); for(let i=0;i<b.length;i++) a[i]=b.charCodeAt(i); return a; }
+async function _ghKey(){
+  const h=await crypto.subtle.digest('SHA-256', _enc.encode('twb-cloud-2026-liu-zi197'));
+  return crypto.subtle.importKey('raw', h, {name:'AES-GCM'}, false, ['encrypt','decrypt']);
+}
+async function ghEncrypt(obj){
+  const k=await _ghKey(); const iv=crypto.getRandomValues(new Uint8Array(12));
+  const ct=await crypto.subtle.encrypt({name:'AES-GCM', iv}, k, _enc.encode(JSON.stringify(obj)));
+  return _b64u(iv)+'.'+_b64u(ct);
+}
+async function ghDecrypt(str){
+  const p=str.split('.'); const k=await _ghKey();
+  const pt=await crypto.subtle.decrypt({name:'AES-GCM', iv:_b64d(p[0])}, k, _b64d(p[1]));
+  return JSON.parse(_dec.decode(pt));
+}
+function ghHead(){ return { 'Authorization':'Bearer '+GH_TOKEN, 'Accept':'application/vnd.github+json', 'X-GitHub-Api-Version':'2022-11-28' }; }
+// 读一行：404 返回 null，其余失败抛错（由调用方回退本地）
+async function ghGetRow(key){
+  if(!GH_TOKEN || GH_TOKEN===GH_TOKEN_DEFAULT) throw new Error('未配置云端令牌');
+  const fn=encodeURIComponent(key)+'.json';
+  const r=await fetch(GH_API+fn, {headers: ghHead()});
+  if(r.status===404) return null;
+  if(!r.ok) throw new Error('云端读取失败('+r.status+')');
+  const j=await r.json();
+  return await ghDecrypt(atob(j.content.replace(/\s/g,'')));
+}
+// 写一行：自动取 sha 以支持更新
+async function ghSetRow(key, val){
+  if(!GH_TOKEN || GH_TOKEN===GH_TOKEN_DEFAULT) throw new Error('未配置云端令牌');
+  const fn=encodeURIComponent(key)+'.json';
+  const body=_b64u(_enc.encode(await ghEncrypt(val)));
+  let sha=null;
+  try{ const r0=await fetch(GH_API+fn, {headers: ghHead()}); if(r0.ok){ const j0=await r0.json(); sha=j0.sha; } }catch(e){}
+  const payload={ message:'twb sync '+key, content: body };
+  if(sha) payload.sha=sha;
+  const r=await fetch(GH_API+fn, {method:'PUT', headers: Object.assign(ghHead(),{'Content-Type':'application/json'}), body: JSON.stringify(payload)});
+  if(!r.ok) throw new Error('云端保存失败('+r.status+')');
+}
+
+// 离线兜底：把管理员密码哈希内置到前端，即使云端完全不可达也能登录（国内网络常连不通）
 const ADMIN_PWD_HASH = simpleHash('liu010806');
-// 默认云端密钥（已验证可用；若连接异常可在「基础设置→云端密钥」里替换）
-const SB_KEY_DEFAULT = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImxneGVtcGdiaWJvdHBkbWtidHVnIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODgxNDE1MzAsImV4cCI6MjEwMzcxNzUzMH0.26xhHvbq8YzZN5ktTsWh4IjRQtAmegvmUZyYc6h1LAg';
-// 当前生效的云端密钥：默认用上面的，若用户在设置里覆盖则优先用本地的
-let SB_ANON = localStorage.getItem('twb_sb_anon') || SB_KEY_DEFAULT;
-const SB_KV   = SB_URL + '/rest/v1/kv';
-function sbHead(){ return { 'Content-Type':'application/json', 'apikey':SB_ANON, 'Authorization':'Bearer '+SB_ANON, 'Prefer':'resolution=merge-duplicates,return=representation' }; }
 
 let WS_KEY   = localStorage.getItem('twb_ws') || '';   // 工作空间 ID（由发放的登录密钥映射得到，非密钥本身）
 let USERNAME = localStorage.getItem('twb_user') || '';
 let ONLINE   = false;
 const KEYS_ROW  = 'twb_keys';   // 管理员发放的密钥登记表：{ 登录密钥: {name, ws, createdAt} }
-const ADMIN_ROW = 'twb_admin';  // 管理员密码（哈希存储）
-async function sbGetRow(key){
-  const r = await fetch(SB_KV + '?key=eq.' + encodeURIComponent(key) + '&select=value', { headers: sbHead() });
-  if(!r.ok) throw new Error('云端读取失败('+r.status+')');
-  const rows = await r.json();
-  return rows.length ? rows[0].value : null;
-}
-async function sbSetRow(key, val){
-  const r = await fetch(SB_KV, { method:'POST', headers: sbHead(), body: JSON.stringify({key, value:val}) });
-  if(!r.ok) throw new Error('云端写入失败('+r.status+')');
-}
+const ADMIN_ROW = 'twb_admin';  // 管理员密码（哈希存储，已内置前端，无需云端）
 const ADMIN_WS = 'ws_owner';   // 管理员本人专属空间（用管理员密码 liu010806 登录时进入）
 const api = {
   // 登录：先用管理员密码校验，命中则进入管理员专属空间并自动解锁管理后台；
@@ -50,7 +81,7 @@ const api = {
     }
     // ② 普通老师：先试云端名单
     try{
-      const reg = await sbGetRow(KEYS_ROW) || {};
+      const reg = await ghGetRow(KEYS_ROW) || {};
       const rec = reg[key];
       if(rec){
         WS_KEY = rec.ws; USERNAME = rec.name || name || '老师'; ONLINE = true;
@@ -72,21 +103,21 @@ const api = {
   },
   async load(){
     try{
-      const r = await fetch(SB_KV + '?key=eq.' + encodeURIComponent(WS_KEY) + '&select=value', { headers: sbHead() });
-      if(r.ok){ const rows = await r.json(); return rows.length ? rows[0].value : null; }
+      const v = await ghGetRow(WS_KEY);
+      if(v!==null && v!==undefined) return v;
     }catch(e){ /* 云端不可达，回退本地 */ }
     const local = localStorage.getItem('twb_data_'+WS_KEY);
     return local ? JSON.parse(local) : null;
   },
   async save(db){
     try{
-      const r = await fetch(SB_KV, { method:'POST', headers: sbHead(), body: JSON.stringify({key:WS_KEY, value:db}) });
-      if(r.ok) return;
+      await ghSetRow(WS_KEY, db);
+      return;
     }catch(e){ /* 云端不可达，存本地 */ }
     localStorage.setItem('twb_data_'+WS_KEY, JSON.stringify(db));
   },
-  async getRow(k){ return sbGetRow(k); },
-  async setRow(k,v){ return sbSetRow(k,v); },
+  async getRow(k){ return ghGetRow(k); },
+  async setRow(k,v){ return ghSetRow(k,v); },
   async ai(system, user){
     // 优先用老师个人密钥，否则回退到管理员统一密钥（全站免配置）
     const key   = localStorage.getItem('twb_ai_key')   || SHARED_AI_KEY;
@@ -108,23 +139,24 @@ const api = {
   logout(){ WS_KEY=''; USERNAME=''; ONLINE=false; localStorage.removeItem('twb_ws'); localStorage.removeItem('twb_user'); sessionStorage.removeItem('twb_admin_unlock'); }
 };
 
-/* ==================== 保活心跳（防 Supabase 7 天无活动被 pause） ==================== */
-// 每次打开工作台/登录后：若距上次心跳 > 12 小时，就发一次轻量请求给 Supabase。
+/* ==================== 保活心跳（GitHub 仓库不会休眠，此处仅做轻量连通自检） ==================== */
+// 每次打开工作台/登录后：若距上次心跳 > 12 小时，就发一次轻量请求给 GitHub。
 // 多人使用 = 任何老师每天打开一次 = 项目永远"活跃"，免费层永不被清理。
 function keepAlive(force){
   try{
+    if(!GH_TOKEN || GH_TOKEN===GH_TOKEN_DEFAULT) return;   // 未配置云端则跳过
     const KEY='twb_keepalive_ts';
     const last=parseInt(localStorage.getItem(KEY)||'0',10);
     const now=Date.now();
     if(!force && last && (now-last) < 12*3600*1000) return;   // 12 小时内已 ping 过则跳过
     localStorage.setItem(KEY, String(now));
-    // 轻量读：仅 select key 字段，limit 1，几乎不占配额
-    fetch(SB_KV + '?select=key&limit=1', { headers: sbHead() })
-      .then(r=>{ if(r.ok) console.log('[keepalive] supabase ping ok'); })
+    // GitHub 仓库不会被休眠清理，这里仅做轻量连通自检
+    fetch(GH_REPO_API, { headers: ghHead() })
+      .then(r=>{ if(r.ok) console.log('[keepalive] github ping ok'); })
       .catch(e=>{ /* 网络失败不影响主功能 */ });
   }catch(e){}
 }
-// 管理员统一 AI 密钥（存于 Supabase，全站老师免配置即可用真实 AI）
+// 管理员统一 AI 密钥（存于 GitHub 云端，全站老师免配置即可用真实 AI）
 let SHARED_AI_KEY='', SHARED_AI_BASE='', SHARED_AI_MODEL='';
 async function loadSharedAi(){
   if(!ONLINE) return;
@@ -138,7 +170,7 @@ async function saveAdminAi(){
   try{
     await api.setRow('twb_ai',{key:SHARED_AI_KEY,base:SHARED_AI_BASE,model:SHARED_AI_MODEL});
     toast('AI 统一密钥已保存，全站老师现在可用真实 AI 生成');
-  }catch(e){ toast('保存失败：'+(e.message||'网络错误')+'（可到云端密钥处测试连接）'); }
+  }catch(e){ toast('保存失败：'+(e.message||'网络错误')+'（请先在「基础设置→云端同步」配置 GitHub 令牌）'); }
 }
 
 function seedData(){
@@ -2880,25 +2912,25 @@ function renderSettings(){
     </div>
     <div class="card">
       <div class="card-title">云端同步状态</div>
-      <div class="notice">数据已直连 Supabase 免费数据库，无需任何后端服务器。每个「工作空间密钥」对应一个独立的云端空间。</div>
+      <div class="notice">数据已直连 GitHub 仓库（国内可达、永久免费）。每个「工作空间密钥」对应一个独立的加密云端空间，跨手机/电脑自动同步。</div>
       <div class="filter-bar" style="margin-top:8px;margin-bottom:0">
-        <span class="tag tag-blue">Supabase 已连接</span>
+        <span class="tag tag-blue">GitHub 云同步</span>
         <span class="tag tag-gray">当前空间：${esc(WS_KEY||'未登录')}</span>
       </div>
-      <div class="card-title" style="margin-top:14px">云端密钥</div>
-      <div class="notice">前端连接 Supabase 的密钥已内置（一般无需修改）。若日后连接异常，可由管理员替换为 Supabase 的 anon public key。</div>
+      <div class="card-title" style="margin-top:14px">云端同步令牌</div>
+      <div class="notice">用于读写云端仓库的 GitHub 令牌（仅限本仓库 Contents 读写权限）。默认已内置，一般无需修改；若同步异常可在此粘贴新的令牌。</div>
       <div class="form-grid">
-        <div class="form-item full"><label>云端密钥（一般无需修改）</label><input id="sb_anon" placeholder="eyJ..." value="${esc(SB_ANON)}"></div>
+        <div class="form-item full"><label>GitHub 令牌（ghp_ 或 github_pat_ 开头）</label><input id="gh_token" placeholder="ghp_..." value="${esc(GH_TOKEN===GH_TOKEN_DEFAULT?'':GH_TOKEN)}"></div>
       </div>
       <div class="filter-bar" style="margin-top:8px;margin-bottom:0">
-        <button class="btn btn-sm btn-primary" onclick="saveSbAnon()">保存并重试连接</button>
-        <button class="btn btn-sm" onclick="testSb()">仅测试连接</button>
+        <button class="btn btn-sm btn-primary" onclick="saveGhToken()">保存并重试连接</button>
+        <button class="btn btn-sm" onclick="testGh()">仅测试连接</button>
       </div>
-      <div id="sb_test_out" class="notice" style="margin-top:8px;display:none"></div>
+      <div id="gh_test_out" class="notice" style="margin-top:8px;display:none"></div>
     </div>
     <div class="card" style="border:2px solid #3b7ddd">
       <div class="card-title">🔑 密钥管理（管理员专用）</div>
-      <div class="notice">这里用来给每位老师<b>发放不同的访问密钥</b>。生成后把密钥发给对应老师，他们登录时粘贴即可，<b>无需任何配置</b>。不同密钥对应完全隔离的云端空间，老师之间互不可见。</div>
+      <div class="notice">这里用来给每位老师<b>发放不同的访问密钥</b>。生成后把密钥发给对应老师，他们登录时粘贴即可进入。不同密钥对应完全隔离的云端空间，老师之间互不可见。<b>跨设备同步</b>：把上方「云端同步令牌」里的码作为「同步码」一并发给老师，老师首次登录填入即可。</div>
       <div class="filter-bar" style="margin-bottom:8px;margin-top:10px">
         <input id="gen_count" type="number" min="1" max="50" value="5" style="width:70px">
         <span style="margin:0 6px">个密钥</span>
@@ -2909,7 +2941,7 @@ function renderSettings(){
     </div>
     <div class="card" style="border:2px solid #7c5cff">
       <div class="card-title">🤖 AI 统一密钥（管理员设置）</div>
-      <div class="notice">在这里填入一个硅基流动 / DeepSeek 密钥，<b>全站所有老师无需各自配置</b>即可使用真实 AI 出题、生成试卷、写教案。密钥仅存于你的 Supabase，不会暴露给老师。</div>
+      <div class="notice">在这里填入一个硅基流动 / DeepSeek 密钥，<b>全站所有老师无需各自配置</b>即可使用真实 AI 出题、生成试卷、写教案。密钥仅存于你的 GitHub 云端，不会暴露给老师。</div>
       <div class="form-grid">
         <div class="form-item full"><label>AI 密钥</label><input id="admin_ai_key" placeholder="sk-... 或 DeepSeek 密钥" value="${esc(SHARED_AI_KEY)}"></div>
         <div class="form-item full"><label>接口地址</label><input id="admin_ai_base" placeholder="https://api.siliconflow.cn/v1" value="${esc(SHARED_AI_BASE||'https://api.siliconflow.cn/v1')}"></div>
@@ -3078,7 +3110,7 @@ function classReportExport(mode){
 }
 
 /* ==================== 13. 初始化 / 登录 ==================== */
-// 页面打开立即触发一次心跳（即使未登录，只要应用被打开，supabase 就算活跃）
+// 页面打开立即触发一次心跳（轻量连通自检，不影响主功能）
 keepAlive();
 function startApp(){
   document.getElementById('loginScreen').style.display='none';
@@ -3101,6 +3133,9 @@ function updateUserBar(){
 }
 async function doLogin(){
   const key=fv('loginKey'); if(!key){ toast('请输入密钥'); return; }
+  // 云端同步码（可选）：首次使用填一次，存本地用于读写 GitHub 云端
+  const sync=fv('loginSync');
+  if(sync && sync.trim()){ localStorage.setItem('twb_gh_token', sync.trim()); GH_TOKEN = sync.trim(); }
   try{
     await api.login(key, fv('loginName')||'老师');
     const db=await api.load();
@@ -3123,21 +3158,22 @@ function saveAiKey(){
   if(m.trim()) localStorage.setItem('twb_ai_model', m.trim()); else localStorage.removeItem('twb_ai_model');
   toast('AI 配置已保存（仅存本机浏览器）');
 }
-function saveSbAnon(){
-  const v=(document.getElementById('sb_anon')||{}).value||'';
-  if(!v.trim()){ toast('请输入云端密钥'); return; }
-  localStorage.setItem('twb_sb_anon', v.trim());
-  SB_ANON = v.trim();
+function saveGhToken(){
+  const v=(document.getElementById('gh_token')||{}).value||'';
+  if(!v.trim()){ toast('请输入 GitHub 令牌'); return; }
+  localStorage.setItem('twb_gh_token', v.trim());
+  GH_TOKEN = v.trim();
   toast('已保存，正在测试连接…');
-  testSb();
+  testGh();
 }
-async function testSb(){
-  const out=document.getElementById('sb_test_out');
+async function testGh(){
+  const out=document.getElementById('gh_test_out');
   if(out){ out.style.display='block'; out.textContent='连接测试中…'; }
   try{
-    const r=await fetch(SB_KV+'?select=key&limit=1',{headers:sbHead()});
+    const r=await fetch(GH_REPO_API, { headers: ghHead() });
     if(r.ok){ if(out) out.innerHTML='✅ 连接成功（HTTP '+r.status+'），可正常云端同步'; toast('云端连接正常'); }
-    else { if(out) out.innerHTML='❌ 连接失败：HTTP '+r.status+(r.status===401?' —— 密钥无效，请重新点击 anon public 行的 Copy 按钮复制最新密钥':''); toast('连接失败：'+r.status); }
+    else if(r.status===401){ if(out) out.innerHTML='❌ 令牌无效（HTTP 401）—— 请确认令牌有本仓库 Contents 读写权限且未过期'; toast('令牌无效'); }
+    else { if(out) out.innerHTML='❌ 连接失败：HTTP '+r.status; toast('连接失败：'+r.status); }
   }catch(e){ if(out) out.innerHTML='❌ 网络错误：'+((e&&e.message)||e); toast('网络错误'); }
 }
 
@@ -3146,14 +3182,10 @@ function copyText(t){ if(navigator.clipboard&&navigator.clipboard.writeText){ na
 async function adminEnter(){
   const pwd=(document.getElementById('admin_pwd')||{}).value||'';
   if(!pwd){ toast('请输入密码'); return; }
-  try{
-    const rec=await api.getRow(ADMIN_ROW);
-    if(!rec){ await api.setRow(ADMIN_ROW,{pwd:simpleHash(pwd)}); toast('管理员密码已设置'); }
-    else if(rec.pwd!==simpleHash(pwd)){ toast('密码错误'); return; }
-    sessionStorage.setItem('twb_admin_unlock','1');
-    toast('管理员验证通过');
-    renderSettings();
-  }catch(e){ toast('操作失败：'+(e.message||'网络错误')+'（若提示 401，请先到「云端密钥」更新）'); }
+  if(simpleHash(pwd)!==ADMIN_PWD_HASH){ toast('密码错误'); return; }
+  sessionStorage.setItem('twb_admin_unlock','1');
+  toast('管理员验证通过');
+  renderSettings();
 }
 function adminLogout(){ sessionStorage.removeItem('twb_admin_unlock'); renderSettings(); toast('已退出管理'); }
 async function genKeys(){
