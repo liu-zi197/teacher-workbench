@@ -22,6 +22,10 @@
         <label>您的称呼（选填）</label>
         <input id="loginName" placeholder="如：王老师" autocomplete="off" onkeydown="if(event.key==='Enter')doLogin()">
       </div>
+      <div class="login-field">
+        <label>云端同步码（选填，仅首次需填）</label>
+        <input id="loginSync" placeholder="管理员提供的同步码，填一次即可" autocomplete="off" onkeydown="if(event.key==='Enter')doLogin()">
+      </div>
       <button class="btn btn-primary login-btn" onclick="doLogin()">进入工作台</button>
     </div>
   </div>
