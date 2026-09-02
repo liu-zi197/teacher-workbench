@@ -7,14 +7,13 @@
 /* ==================== 1. 数据与存储 ==================== */
 const DB_KEY = 'teacher_wb_v1';
 
-/* ==================== 0. 云端模式（直连 GitHub 仓库，国内可达、永久免费） ==================== */
+/* ==================== 0. 云端模式（经 Cloudflare 中转直连 GitHub，老师零配置） ==================== */
 // 数据存于公开仓库 teacher-workbench 的 data/ 目录，内容用 AES-GCM 加密（防公开仓库内容被随手读取）。
-// GH_TOKEN 为「仅限本仓库 Contents 读写」的令牌；可在「基础设置 → 云端同步」里覆盖（存本地）。
+// 令牌由 Cloudflare Worker（worker.js）在服务端保管，前端无需任何令牌/同步码，老师拿密钥直接登。
 const GH_REPO  = 'liu-zi197/teacher-workbench';
-const GH_API   = 'https://api.github.com/repos/'+GH_REPO+'/contents/data/';
-const GH_REPO_API = 'https://api.github.com/repos/'+GH_REPO;
-const GH_TOKEN_DEFAULT = '';   // 默认不内置令牌：由管理员在「基础设置→云端同步令牌」或老师登录页「同步码」填写（存本地，不进仓库，避免密钥泄露防护拦截）
-let   GH_TOKEN = localStorage.getItem('twb_gh_token') || GH_TOKEN_DEFAULT;
+// 云端中转地址：部署 worker.js 后把你的 Worker 网址填到下面（形如 https://twb-proxy.xxxx.workers.dev）
+const GH_PROXY = 'https://throbbing-thunder-85c0.liupai891.workers.dev';   // ← 部署 Cloudflare Worker 后填入；留空则自动回退本机存储
+const GH_API   = GH_PROXY ? (GH_PROXY.replace(/\/$/,'') + '/repos/'+GH_REPO+'/contents/data/') : '';
 
 // —— AES-GCM 加密（密钥在前端可见，仅防公开仓库内容被偶然读取，非绝对保密）——
 const _enc = new TextEncoder(), _dec = new TextDecoder();
@@ -34,10 +33,10 @@ async function ghDecrypt(str){
   const pt=await crypto.subtle.decrypt({name:'AES-GCM', iv:_b64d(p[0])}, k, _b64d(p[1]));
   return JSON.parse(_dec.decode(pt));
 }
-function ghHead(){ return { 'Authorization':'Bearer '+GH_TOKEN, 'Accept':'application/vnd.github+json', 'X-GitHub-Api-Version':'2022-11-28' }; }
+function ghHead(){ return { 'Accept':'application/vnd.github+json', 'X-GitHub-Api-Version':'2022-11-28' }; }
 // 读一行：404 返回 null，其余失败抛错（由调用方回退本地）
 async function ghGetRow(key){
-  if(!GH_TOKEN || GH_TOKEN===GH_TOKEN_DEFAULT) throw new Error('未配置云端令牌');
+  if(!GH_API) throw new Error('未配置云端中转');
   const fn=encodeURIComponent(key)+'.json';
   const r=await fetch(GH_API+fn, {headers: ghHead()});
   if(r.status===404) return null;
@@ -47,7 +46,7 @@ async function ghGetRow(key){
 }
 // 写一行：自动取 sha 以支持更新
 async function ghSetRow(key, val){
-  if(!GH_TOKEN || GH_TOKEN===GH_TOKEN_DEFAULT) throw new Error('未配置云端令牌');
+  if(!GH_API) throw new Error('未配置云端中转');
   const fn=encodeURIComponent(key)+'.json';
   const body=_b64u(_enc.encode(await ghEncrypt(val)));
   let sha=null;
@@ -140,19 +139,19 @@ const api = {
 };
 
 /* ==================== 保活心跳（GitHub 仓库不会休眠，此处仅做轻量连通自检） ==================== */
-// 每次打开工作台/登录后：若距上次心跳 > 12 小时，就发一次轻量请求给 GitHub。
+// 每次打开工作台/登录后：若距上次心跳 > 12 小时，就发一次轻量请求给云端中转。
 // 多人使用 = 任何老师每天打开一次 = 项目永远"活跃"，免费层永不被清理。
 function keepAlive(force){
   try{
-    if(!GH_TOKEN || GH_TOKEN===GH_TOKEN_DEFAULT) return;   // 未配置云端则跳过
+    if(!GH_API) return;   // 未配置云端中转则跳过
     const KEY='twb_keepalive_ts';
     const last=parseInt(localStorage.getItem(KEY)||'0',10);
     const now=Date.now();
     if(!force && last && (now-last) < 12*3600*1000) return;   // 12 小时内已 ping 过则跳过
     localStorage.setItem(KEY, String(now));
     // GitHub 仓库不会被休眠清理，这里仅做轻量连通自检
-    fetch(GH_REPO_API, { headers: ghHead() })
-      .then(r=>{ if(r.ok) console.log('[keepalive] github ping ok'); })
+    fetch(GH_API+'twb_probe.json', { headers: ghHead() })
+      .then(r=>{ if(r.ok || r.status===404) console.log('[keepalive] cloud ping ok'); })
       .catch(e=>{ /* 网络失败不影响主功能 */ });
   }catch(e){}
 }
@@ -2912,25 +2911,15 @@ function renderSettings(){
     </div>
     <div class="card">
       <div class="card-title">云端同步状态</div>
-      <div class="notice">数据已直连 GitHub 仓库（国内可达、永久免费）。每个「工作空间密钥」对应一个独立的加密云端空间，跨手机/电脑自动同步。</div>
+      <div class="notice">数据经 Cloudflare 中转直连 GitHub 仓库（永久免费、国内可达）。每个「工作空间密钥」对应一个独立的加密云端空间，<b>跨手机/电脑自动同步</b>。老师登录无需填任何码。</div>
       <div class="filter-bar" style="margin-top:8px;margin-bottom:0">
-        <span class="tag tag-blue">GitHub 云同步</span>
+        <span class="tag ${GH_PROXY?'tag-green':'tag-gray'}">${GH_PROXY?'☁️ 云端中转已启用':'⚠️ 云端中转未配置（仅本机存储）'}</span>
         <span class="tag tag-gray">当前空间：${esc(WS_KEY||'未登录')}</span>
       </div>
-      <div class="card-title" style="margin-top:14px">云端同步令牌</div>
-      <div class="notice">用于读写云端仓库的 GitHub 令牌（仅限本仓库 Contents 读写权限）。默认已内置，一般无需修改；若同步异常可在此粘贴新的令牌。</div>
-      <div class="form-grid">
-        <div class="form-item full"><label>GitHub 令牌（ghp_ 或 github_pat_ 开头）</label><input id="gh_token" placeholder="ghp_..." value="${esc(GH_TOKEN===GH_TOKEN_DEFAULT?'':GH_TOKEN)}"></div>
-      </div>
-      <div class="filter-bar" style="margin-top:8px;margin-bottom:0">
-        <button class="btn btn-sm btn-primary" onclick="saveGhToken()">保存并重试连接</button>
-        <button class="btn btn-sm" onclick="testGh()">仅测试连接</button>
-      </div>
-      <div id="gh_test_out" class="notice" style="margin-top:8px;display:none"></div>
     </div>
     <div class="card" style="border:2px solid #3b7ddd">
       <div class="card-title">🔑 密钥管理（管理员专用）</div>
-      <div class="notice">这里用来给每位老师<b>发放不同的访问密钥</b>。生成后把密钥发给对应老师，他们登录时粘贴即可进入。不同密钥对应完全隔离的云端空间，老师之间互不可见。<b>跨设备同步</b>：把上方「云端同步令牌」里的码作为「同步码」一并发给老师，老师首次登录填入即可。</div>
+      <div class="notice">这里用来给每位老师<b>发放不同的访问密钥</b>。生成后把密钥发给对应老师，他们登录时粘贴即可进入，<b>无需填任何码</b>。不同密钥对应完全隔离的云端空间，老师之间互不可见，且跨手机/电脑自动同步。</div>
       <div class="filter-bar" style="margin-bottom:8px;margin-top:10px">
         <input id="gen_count" type="number" min="1" max="50" value="5" style="width:70px">
         <span style="margin:0 6px">个密钥</span>
@@ -3133,9 +3122,6 @@ function updateUserBar(){
 }
 async function doLogin(){
   const key=fv('loginKey'); if(!key){ toast('请输入密钥'); return; }
-  // 云端同步码（可选）：首次使用填一次，存本地用于读写 GitHub 云端
-  const sync=fv('loginSync');
-  if(sync && sync.trim()){ localStorage.setItem('twb_gh_token', sync.trim()); GH_TOKEN = sync.trim(); }
   try{
     await api.login(key, fv('loginName')||'老师');
     const db=await api.load();
@@ -3157,24 +3143,6 @@ function saveAiKey(){
   const m=(document.getElementById('ai_model')||{}).value||'';
   if(m.trim()) localStorage.setItem('twb_ai_model', m.trim()); else localStorage.removeItem('twb_ai_model');
   toast('AI 配置已保存（仅存本机浏览器）');
-}
-function saveGhToken(){
-  const v=(document.getElementById('gh_token')||{}).value||'';
-  if(!v.trim()){ toast('请输入 GitHub 令牌'); return; }
-  localStorage.setItem('twb_gh_token', v.trim());
-  GH_TOKEN = v.trim();
-  toast('已保存，正在测试连接…');
-  testGh();
-}
-async function testGh(){
-  const out=document.getElementById('gh_test_out');
-  if(out){ out.style.display='block'; out.textContent='连接测试中…'; }
-  try{
-    const r=await fetch(GH_REPO_API, { headers: ghHead() });
-    if(r.ok){ if(out) out.innerHTML='✅ 连接成功（HTTP '+r.status+'），可正常云端同步'; toast('云端连接正常'); }
-    else if(r.status===401){ if(out) out.innerHTML='❌ 令牌无效（HTTP 401）—— 请确认令牌有本仓库 Contents 读写权限且未过期'; toast('令牌无效'); }
-    else { if(out) out.innerHTML='❌ 连接失败：HTTP '+r.status; toast('连接失败：'+r.status); }
-  }catch(e){ if(out) out.innerHTML='❌ 网络错误：'+((e&&e.message)||e); toast('网络错误'); }
 }
 
 function simpleHash(s){ let h=0; for(let i=0;i<s.length;i++){ h=(h*31+s.charCodeAt(i))>>>0; } return 'h'+h.toString(16); }
