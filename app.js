@@ -12,7 +12,7 @@ const DB_KEY = 'teacher_wb_v1';
 // 令牌由 Cloudflare Worker（worker.js）在服务端保管，前端无需任何令牌/同步码，老师拿密钥直接登。
 const GH_REPO  = 'liu-zi197/teacher-workbench';
 // 云端中转地址：部署 worker.js 后把你的 Worker 网址填到下面（形如 https://twb-proxy.xxxx.workers.dev）
-const GH_PROXY = 'https://throbbing-thunder-85c0.liupai891.workers.dev';   // ← 部署 Cloudflare Worker 后填入；留空则自动回退本机存储
+const GH_PROXY = '';   // ← 部署 Cloudflare Worker 后填入；留空则自动回退本机存储
 const GH_API   = GH_PROXY ? (GH_PROXY.replace(/\/$/,'') + '/repos/'+GH_REPO+'/contents/data/') : '';
 
 // —— AES-GCM 加密（密钥在前端可见，仅防公开仓库内容被偶然读取，非绝对保密）——
