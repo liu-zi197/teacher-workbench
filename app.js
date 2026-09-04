@@ -12,7 +12,7 @@ const DB_KEY = 'teacher_wb_v1';
 // 令牌由 Cloudflare Worker（worker.js）在服务端保管，前端无需任何令牌/同步码，老师拿密钥直接登。
 const GH_REPO  = 'liu-zi197/teacher-workbench';
 // 云端中转地址：部署 worker.js 后把你的 Worker 网址填到下面（形如 https://twb-proxy.xxxx.workers.dev）
-const GH_PROXY = '';   // ← 部署 Cloudflare Worker 后填入；留空则自动回退本机存储
+const GH_PROXY = 'https://throbbing-thunder-85c0.liupai891.workers.dev';   // Cloudflare Worker 中转；国内不稳时可换自定义域名
 const GH_API   = GH_PROXY ? (GH_PROXY.replace(/\/$/,'') + '/repos/'+GH_REPO+'/contents/data/') : '';
 
 // —— AES-GCM 加密（密钥在前端可见，仅防公开仓库内容被偶然读取，非绝对保密）——
@@ -69,6 +69,7 @@ const ADMIN_WS = 'ws_owner';   // 管理员本人专属空间（用管理员密�
 const api = {
   // 登录：先用管理员密码校验，命中则进入管理员专属空间并自动解锁管理后台；
   // 否则校验是否命中发放的访问密钥。
+  // 登录：①管理员密码秒登；②普通老师本地名单优先（秒登、不依赖网络），后台静默补拉云端名单（支持跨设备新密钥）；③本地无则试云端（带超时）
   async login(key, name){
     key=(key||'').trim(); if(!key) throw new Error('请输入密钥');
     // ① 离线兜底：本地内置管理员密码，云端不可达也能进
@@ -78,7 +79,17 @@ const api = {
       localStorage.setItem('twb_ws', WS_KEY); localStorage.setItem('twb_user', USERNAME);
       return;
     }
-    // ② 普通老师：先试云端名单
+    // ② 本地名单优先（已在本机登录过的老师：秒登，绝不卡）
+    const localReg = JSON.parse(localStorage.getItem('twb_local_keys')||'{}');
+    if(localReg[key]){
+      WS_KEY = localReg[key].ws; USERNAME = localReg[key].name || name || '老师'; ONLINE = true;
+      sessionStorage.removeItem('twb_admin_unlock');
+      localStorage.setItem('twb_ws', WS_KEY); localStorage.setItem('twb_user', USERNAME);
+      // 后台静默补拉云端名单，使在其它设备新发的密钥也能被本机识别
+      bgCloud(async()=>{ try{ const reg=await ghGetRow(KEYS_ROW)||{}; if(reg[key]){ const lr=JSON.parse(localStorage.getItem('twb_local_keys')||'{}'); lr[key]=reg[key]; localStorage.setItem('twb_local_keys', JSON.stringify(lr)); } }catch(e){} });
+      return;
+    }
+    // ③ 本地没有 → 试云端名单（带超时，失败即报错，不会无限卡）
     try{
       const reg = await ghGetRow(KEYS_ROW) || {};
       const rec = reg[key];
@@ -86,18 +97,10 @@ const api = {
         WS_KEY = rec.ws; USERNAME = rec.name || name || '老师'; ONLINE = true;
         sessionStorage.removeItem('twb_admin_unlock');
         localStorage.setItem('twb_ws', WS_KEY); localStorage.setItem('twb_user', USERNAME);
+        const lr=JSON.parse(localStorage.getItem('twb_local_keys')||'{}'); lr[key]=rec; localStorage.setItem('twb_local_keys', JSON.stringify(lr));
         return;
       }
-    }catch(e){ /* 云端失败，继续走本机名单 */ }
-    // ③ 离线本地名单兜底（本机管理员生成的密钥，保证本机可登）
-    const localReg = JSON.parse(localStorage.getItem('twb_local_keys')||'{}');
-    const lrec = localReg[key];
-    if(lrec){
-      WS_KEY = lrec.ws; USERNAME = lrec.name || name || '老师'; ONLINE = true;
-      sessionStorage.removeItem('twb_admin_unlock');
-      localStorage.setItem('twb_ws', WS_KEY); localStorage.setItem('twb_user', USERNAME);
-      return;
-    }
+    }catch(e){ /* 云端不可达，继续 */ }
     throw new Error('密钥无效，请联系管理员获取');
   },
   async load(){
@@ -3183,37 +3186,38 @@ function toggleKeyListExpand(){
   sessionStorage.setItem('twb_key_list_expand', KEY_LIST_EXPANDED ? '1' : '0');
   refreshKeys();
 }
+function renderKeyList(reg, fresh){
+  const box=document.getElementById('keyList'); if(!box)return;
+  const keys=Object.keys(reg||{});
+  if(!keys.length){ box.innerHTML='暂无已发放密钥。输入数量后点「生成」。'; return; }
+  const total=keys.length;
+  const showAll = KEY_LIST_EXPANDED || total <= KEY_LIST_PAGE_SIZE;
+  const visibleKeys = showAll ? keys : keys.slice(0, KEY_LIST_PAGE_SIZE);
+  const rows=visibleKeys.map((k)=>{
+    const idx=keys.indexOf(k);
+    const r=reg[k];
+    const tag=(fresh&&fresh.indexOf(k)>=0)?'<span class="tag tag-blue">新</span>':'';
+    return `<tr>
+      <td style="text-align:center;color:var(--ink2);width:48px">${idx+1}</td>
+      <td><code style="background:#eef3ff;padding:3px 9px;border-radius:6px;cursor:pointer;font-weight:600" onclick="copyKey('${k}')" title="点击复制">${esc(k)}</code>${tag}</td>
+      <td><input id="kn_${k}" value="${esc(r.name||'')}" placeholder="填写老师姓名" style="width:100%;min-width:120px;padding:6px 10px;border:1px solid var(--line);border-radius:8px;background:#fbfdfe" onchange="saveKeyName('${k}')" onkeydown="if(event.key==='Enter')saveKeyName('${k}')"></td>
+      <td style="text-align:right;white-space:nowrap"><button class="btn btn-sm" onclick="revokeKey('${k}')">撤销</button></td>
+    </tr>`;
+  }).join('');
+  const expandBar = total > KEY_LIST_PAGE_SIZE
+    ? `<div style="text-align:center;margin-top:10px">
+         <button class="btn btn-sm" onclick="toggleKeyListExpand()">${showAll ? '收起 ↑' : '展开全部（共 '+total+' 个） ↓'}</button>
+       </div>`
+    : '';
+  box.innerHTML='<div style="margin-bottom:8px">已发放 <b>'+total+'</b> 个密钥（点击密钥可复制，填写老师姓名后自动保存）：</div>'+
+    '<table class="tbl"><thead><tr><th style="width:48px">序号</th><th>访问密钥</th><th>老师姓名</th><th style="text-align:right">操作</th></tr></thead><tbody>'+rows+'</tbody></table>'+expandBar;
+}
+// 密钥列表：本机优先秒显，后台静默补拉云端合并
 async function refreshKeys(fresh){
   const box=document.getElementById('keyList'); if(!box)return;
-  try{
-    let reg={};
-    try{ reg = await api.getRow(KEYS_ROW) || {}; }catch(e){ reg={}; }
-    // 合并本机本地名单（云端不可达时仍可见）
-    try{ const localReg = JSON.parse(localStorage.getItem('twb_local_keys')||'{}'); reg = Object.assign({}, localReg, reg); }catch(e){}
-    const keys=Object.keys(reg);
-    if(!keys.length){ box.innerHTML='暂无已发放密钥。输入数量后点「生成」。'; return; }
-    const total=keys.length;
-    const showAll = KEY_LIST_EXPANDED || total <= KEY_LIST_PAGE_SIZE;
-    const visibleKeys = showAll ? keys : keys.slice(0, KEY_LIST_PAGE_SIZE);
-    const rows=visibleKeys.map((k)=>{
-      const idx=keys.indexOf(k);
-      const r=reg[k];
-      const tag=(fresh&&fresh.indexOf(k)>=0)?'<span class="tag tag-blue">新</span>':'';
-      return `<tr>
-        <td style="text-align:center;color:var(--ink2);width:48px">${idx+1}</td>
-        <td><code style="background:#eef3ff;padding:3px 9px;border-radius:6px;cursor:pointer;font-weight:600" onclick="copyKey('${k}')" title="点击复制">${esc(k)}</code>${tag}</td>
-        <td><input id="kn_${k}" value="${esc(r.name||'')}" placeholder="填写老师姓名" style="width:100%;min-width:120px;padding:6px 10px;border:1px solid var(--line);border-radius:8px;background:#fbfdfe" onchange="saveKeyName('${k}')" onkeydown="if(event.key==='Enter')saveKeyName('${k}')"></td>
-        <td style="text-align:right;white-space:nowrap"><button class="btn btn-sm" onclick="revokeKey('${k}')">撤销</button></td>
-      </tr>`;
-    }).join('');
-    const expandBar = total > KEY_LIST_PAGE_SIZE
-      ? `<div style="text-align:center;margin-top:10px">
-           <button class="btn btn-sm" onclick="toggleKeyListExpand()">${showAll ? '收起 ↑' : '展开全部（共 '+total+' 个） ↓'}</button>
-         </div>`
-      : '';
-    box.innerHTML='<div style="margin-bottom:8px">已发放 <b>'+total+'</b> 个密钥（点击密钥可复制，填写老师姓名后自动保存）：</div>'+
-      '<table class="tbl"><thead><tr><th style="width:48px">序号</th><th>访问密钥</th><th>老师姓名</th><th style="text-align:right">操作</th></tr></thead><tbody>'+rows+'</tbody></table>'+expandBar;
-  }catch(e){ box.innerHTML='读取失败：'+(e.message||'网络错误'); }
+  const localReg = JSON.parse(localStorage.getItem('twb_local_keys')||'{}');
+  renderKeyList(localReg, fresh);   // 先秒显本机
+  bgCloud(async()=>{ try{ const reg=await api.getRow(KEYS_ROW)||{}; const merged=Object.assign({}, localReg, reg); localStorage.setItem('twb_local_keys', JSON.stringify(merged)); renderKeyList(merged, fresh); }catch(e){} });
 }
 async function saveKeyName(k){
   const v=(document.getElementById('kn_'+k)||{}).value||'';
